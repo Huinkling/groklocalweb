@@ -11,6 +11,30 @@
             --text-color: #ffffff;
             --border-color: rgba(255, 255, 255, 0.1);
             --hover-color: rgba(255, 255, 255, 0.05);
+            --success-color: rgba(34, 197, 94, 0.9);
+            --error-color: rgba(220, 38, 38, 0.9);
+        }
+        
+        /* 通知样式 */
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            z-index: 2000;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            transition: all 0.3s ease;
+        }
+        
+        .notification.success {
+            background-color: var(--success-color);
+        }
+        
+        .notification.error {
+            background-color: var(--error-color);
         }
         body {
             font-family: "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -642,14 +666,22 @@
                 localStorage.setItem('api_key', apiKey);
                 localStorage.setItem('tavily_api_key', tavilyApiKey);
                 localStorage.setItem('tavily_enabled', tavilyEnabled);
+                
+                // 显示加载状态
+                const saveBtn = document.querySelector('.modal-btn.save');
+                const originalText = saveBtn.textContent;
+                saveBtn.textContent = '正在验证...';
+                saveBtn.disabled = true;
+                
                 socket.emit('update_settings', { 
                     api_key: apiKey,
                     tavily_api_key: tavilyApiKey,
                     tavily_enabled: tavilyEnabled
                 });
-                closeSettingsModal();
+                
+                // 不立即关闭，等待服务器响应
             } else {
-                alert('Please enter a valid API key');
+                alert('请输入有效的API密钥');
             }
         }
 
@@ -658,7 +690,7 @@
 
         // 发送API密钥到服务器
         if (apiKey) {
-            socket.emit('update_api_key', { api_key: apiKey });
+            socket.emit('update_settings', { api_key: apiKey });
         }
 
         function addMessage(content, isUser) {
@@ -761,8 +793,35 @@
 
         socket.on('error', (data) => {
             thinking.style.display = 'none';
-            const errorMessage = data.message || 'An error occurred while getting the response';
+            const errorMessage = data.message || '获取响应时发生错误';
             addMessage(errorMessage, false);
+        });
+        
+        // 监听API密钥更新事件
+        socket.on('api_key_updated', (data) => {
+            const saveBtn = document.querySelector('.modal-btn.save');
+            saveBtn.textContent = '保存';
+            saveBtn.disabled = false;
+            
+            if (data.status === 'success') {
+                // 显示成功消息
+                const notification = document.createElement('div');
+                notification.className = 'notification success';
+                notification.textContent = data.message;
+                document.body.appendChild(notification);
+                
+                // 关闭设置弹窗
+                closeSettingsModal();
+                
+                // 3秒后移除通知
+                setTimeout(() => {
+                    notification.style.opacity = '0';
+                    setTimeout(() => notification.remove(), 300);
+                }, 3000);
+            } else {
+                // 显示错误消息
+                alert(data.message || 'API密钥设置失败');
+            }
         });
 
         function startNewChat() {
