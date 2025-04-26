@@ -224,4 +224,6 @@ Please answer the user's question based on the search results above. If the sear
         })
 
 if __name__ == '__main__':
-    socketio.run(app, port=5001, debug=True)
+    from eventlet import monkey_patch
+    monkey_patch()
+    socketio.run(app, host='0.0.0.0', port=10000)
