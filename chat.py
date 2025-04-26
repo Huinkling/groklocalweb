@@ -257,63 +257,72 @@ def handle_message(data):
             'role': 'user',
             'content': data['message']
         })
+        
+        # If Tavily search is enabled, get search results first
+        search_results = None
+        if user_tavily_settings.get(request.sid, False):
+            tavily_api_key = user_tavily_api_keys.get(request.sid)
+            if tavily_api_key:
+                search_results = get_tavily_search_results(data['message'], tavily_api_key)
+            else:
+                socketio.emit('error', {'message': 'Please set your Tavily API key first'})
+    except Exception as e:
+        logger.error(f'处理消息时发生错误: {str(e)}')
+        socketio.emit('error', {'message': '处理消息时发生错误'})
+        return
     
-    # If Tavily search is enabled, get search results first
-    search_results = None
-    if user_tavily_settings.get(request.sid, False):
-        tavily_api_key = user_tavily_api_keys.get(request.sid)
-        if tavily_api_key:
-            search_results = get_tavily_search_results(data['message'], tavily_api_key)
-        else:
-            socketio.emit('error', {'message': 'Please set your Tavily API key first'})
-    
-    # Build system prompt, using search results as main content
-    system_message = ''
-    if search_results and 'answer' in search_results:
-        search_answer = search_results['answer']
-        system_message = f"""You are a helpful assistant. I will provide you with some search results as background information.
+    try:
+        # Build system prompt, using search results as main content
+        system_message = ''
+        if search_results and 'answer' in search_results:
+            search_answer = search_results['answer']
+            system_message = f"""You are a helpful assistant. I will provide you with some search results as background information.
 
 Search Results:
 {search_answer}
 
 Please answer the user's question based on the search results above. If the search results are relevant, prioritize using information from them. If the search results are not relevant, you can ignore them and answer directly. Please ensure your response is accurate, relevant, and helpful."""
-    else:
-        system_message = 'You are a helpful assistant.'
-    
-    messages = [
-        {
-            'role': 'system',
-            'content': system_message
-        }
-    ] + conversation_history[conversation_id]['messages']
-    
-    response_data = send_message(messages, api_key)
-    
-    if response_data and 'response' in response_data and 'choices' in response_data['response']:
-        assistant_message = response_data['response']['choices'][0]['message']['content']
-        # Add assistant response to history
-        conversation_history[conversation_id]['messages'].append({
-            'role': 'assistant',
-            'content': assistant_message
-        })
-        socketio.emit('response', {
-            'message': assistant_message,
-            'conversation_id': conversation_id,
-            'response_time': round(response_data['response_time'], 2),
-            'token_count': response_data['token_count']
-        })
-    else:
-        socketio.emit('error', {'message': 'API request failed, please check if your API key is correct'})
-        # Send updated history
-        socketio.emit('update_history', {
-            'conversations': [
-                {
-                    'id': cid,
-                    'title': conv['title'],
-                    'timestamp': conv['timestamp']
-                } for cid, conv in conversation_history.items()
-            ]
-        })
+        else:
+            system_message = 'You are a helpful assistant.'
+        
+        messages = [
+            {
+                'role': 'system',
+                'content': system_message
+            }
+        ] + conversation_history[conversation_id]['messages']
+        
+        response_data = send_message(messages, api_key)
+        
+        if response_data and 'response' in response_data and 'choices' in response_data['response']:
+            assistant_message = response_data['response']['choices'][0]['message']['content']
+            # Add assistant response to history
+            conversation_history[conversation_id]['messages'].append({
+                'role': 'assistant',
+                'content': assistant_message
+            })
+            socketio.emit('response', {
+                'message': assistant_message,
+                'conversation_id': conversation_id,
+                'response_time': round(response_data['response_time'], 2),
+                'token_count': response_data['token_count']
+            })
+        else:
+            socketio.emit('error', {'message': 'API request failed, please check if your API key is correct'})
+            # Send updated history
+            socketio.emit('update_history', {
+                'conversations': [
+                    {
+                        'id': cid,
+                        'title': conv['title'],
+                        'timestamp': conv['timestamp']
+                    } for cid, conv in conversation_history.items()
+                ]
+            })
+    except Exception as e:
+        logger.error(f'处理响应时发生错误: {str(e)}')
+        socketio.emit('error', {'message': '处理响应时发生错误'})
+        return
 
 if __name__ == '__main__':
     from eventlet import monkey_patch

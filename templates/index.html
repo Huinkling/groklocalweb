@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Grok 3.0 Chat</title>
     <style>
         :root {
@@ -61,6 +61,24 @@
             top: 0;
             height: 100vh;
             z-index: 200;
+        }
+        
+        /* 移动端侧边栏控制按钮 */
+        #sidebar-toggle {
+            display: none;
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            z-index: 300;
+            background: rgba(29, 78, 216, 0.8);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            font-size: 20px;
+            cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
         }
 
         #settings-btn {
@@ -498,9 +516,85 @@
             color: #666;
             font-style: italic;
         }
+        /* 响应式布局样式 */
+        @media (max-width: 768px) {
+            #history-sidebar {
+                transform: translateX(-100%);
+                width: 80%;
+                max-width: 300px;
+            }
+            
+            #sidebar-toggle {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            
+            #main-content {
+                margin-left: 0;
+                width: 100%;
+            }
+            
+            #input-container {
+                width: 100%;
+                margin-left: 0;
+                padding: 15px;
+                box-sizing: border-box;
+            }
+            
+            #chat-container {
+                margin: 0;
+                padding: 15px 15px 80px;
+            }
+            
+            .message {
+                max-width: 80%;
+                font-size: 15px;
+                padding: 12px 15px;
+            }
+            
+            .title {
+                font-size: 32px;
+                top: 25%;
+                left: 50%;
+            }
+            
+            .modal-content {
+                width: 90%;
+                max-width: 350px;
+                padding: 20px;
+            }
+            
+            #user-input {
+                height: 20px;
+                padding: 12px;
+            }
+            
+            button {
+                padding: 10px 15px;
+                font-size: 14px;
+            }
+            
+            /* 显示侧边栏时的样式 */
+            body.sidebar-visible #history-sidebar {
+                transform: translateX(0);
+            }
+            
+            body.sidebar-visible::after {
+                content: '';
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 150;
+            }
+        }
     </style>
 </head>
 <body>
+    <button id="sidebar-toggle">☰</button>
     <div class="title" draggable="true">Grok 3.0 Local: Built by Ink 🧑🏻‍💻</div>
     <script>
         // Title interaction
@@ -627,6 +721,20 @@
             if (e.key === 'Enter') {
                 e.preventDefault();
                 sendMessage();
+            }
+        });
+        
+        // 移动端侧边栏切换
+        document.getElementById('sidebar-toggle').addEventListener('click', function() {
+            document.body.classList.toggle('sidebar-visible');
+        });
+        
+        // 点击遮罩层关闭侧边栏
+        document.addEventListener('click', function(e) {
+            if (document.body.classList.contains('sidebar-visible') && 
+                !e.target.closest('#history-sidebar') && 
+                e.target.id !== 'sidebar-toggle') {
+                document.body.classList.remove('sidebar-visible');
             }
         });
 
