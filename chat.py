@@ -111,7 +111,7 @@ def send_message(messages, api_key=None):
     }
     
     # 从环境变量获取模型名称和温度设置
-    model = os.getenv('MODEL_NAME', 'grok-3-latest')
+    model = os.getenv('MODEL_NAME', 'grok-3-beta')
     temperature = float(os.getenv('TEMPERATURE', '0'))
     
     data = {

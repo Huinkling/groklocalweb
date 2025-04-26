@@ -27,7 +27,7 @@
 
 ```
 API_URL=https://api.x.ai/v1/chat/completions
-MODEL_NAME=grok-3-latest
+MODEL_NAME=grok-3-beta
 TEMPERATURE=0
 SECRET_KEY=<生成一个安全的随机密钥>
 DEBUG=False
