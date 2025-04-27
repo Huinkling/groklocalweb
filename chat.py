@@ -103,7 +103,8 @@ def calculate_tokens(messages):
 
 def send_message(messages, api_key=None):
     if not api_key:
-        return {'error': '未设置API密钥'}
+        logger.error("未设置API密钥")
+        return {'error': '请先在设置中配置有效的API密钥'}
         
     headers = {
         'Content-Type': 'application/json',
@@ -127,21 +128,46 @@ def send_message(messages, api_key=None):
         for attempt in range(3):
             try:
                 response = requests.post(API_URL, headers=headers, json=data, timeout=30)
-                # 检查API密钥是否有效
+                
+                # 检查各种状态码
                 if response.status_code == 401:
                     logger.error("API密钥无效或已过期")
                     return {'error': 'API密钥无效或已过期，请更新您的API密钥'}
+                elif response.status_code == 429:
+                    logger.error("API请求超过限制")
+                    return {'error': 'API请求频率超过限制，请稍后再试'}
+                elif response.status_code == 500:
+                    logger.error("API服务器错误")
+                    return {'error': 'API服务器出现错误，请稍后再试'}
+                elif response.status_code == 503:
+                    logger.error("API服务暂时不可用")
+                    return {'error': 'API服务暂时不可用，请稍后再试'}
+                
                 response.raise_for_status()
+                
+                # 尝试解析响应数据
+                try:
+                    response_data = response.json()
+                except json.JSONDecodeError as e:
+                    logger.error(f"API响应格式错误: {str(e)}")
+                    return {'error': 'API响应格式错误，请稍后再试'}
+                
+                # 检查响应数据结构
+                if 'choices' not in response_data or not response_data['choices']:
+                    logger.error("API响应数据结构异常")
+                    return {'error': 'API响应数据异常，请稍后再试'}
+                    
                 break
+                
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 if attempt < 2:  # 最多重试2次
                     logger.warning(f"API请求失败，正在重试 ({attempt+1}/3): {str(e)}")
                     continue
+                logger.error(f"API请求重试{attempt+1}次后仍然失败: {str(e)}")
                 raise
                 
         end_time = datetime.now()
         response_time = (end_time - start_time).total_seconds()
-        response_data = response.json()
         token_count = calculate_tokens(messages)
         
         return {
@@ -149,15 +175,19 @@ def send_message(messages, api_key=None):
             'response_time': response_time,
             'token_count': token_count
         }
+        
     except requests.exceptions.Timeout:
         logger.error("API请求超时")
-        return {'error': 'API请求超时，请稍后再试'}
+        return {'error': 'API请求超时，请检查网络连接后再试'}
+    except requests.exceptions.ConnectionError:
+        logger.error("API连接错误")
+        return {'error': 'API连接失败，请检查网络连接或API地址是否正确'}
     except requests.exceptions.RequestException as e:
         logger.error(f'API请求错误: {str(e)}')
-        return {'error': f'API请求错误: {str(e)}'}
+        return {'error': f'API请求出现错误: {str(e)}'}
     except Exception as e:
         logger.error(f'未知错误: {str(e)}')
-        return {'error': '发生未知错误，请检查API密钥或稍后再试'}
+        return {'error': '发生未知错误，请检查API配置或稍后再试'}
 
 @app.route('/')
 def index():
