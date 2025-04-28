@@ -704,6 +704,12 @@
                 openSettingsModal();
                 return false;
             }
+            // 验证API密钥格式
+            if (!apiKey.match(/^[A-Za-z0-9-_]{30,}$/)) {
+                alert('API密钥格式无效，请检查后重新输入');
+                openSettingsModal();
+                return false;
+            }
             return true;
         }
 
@@ -762,34 +768,76 @@
         }
 
         // 保存设置
-        function saveSettings() {
+        async function saveSettings() {
             const apiKeyInput = document.getElementById('api-key');
             const tavilySearchInput = document.getElementById('tavily-search');
             
-            apiKey = apiKeyInput.value.trim();
-            tavilyApiKey = document.getElementById('tavily-api-key').value.trim();
-            tavilyEnabled = tavilySearchInput.checked;
+            const newApiKey = apiKeyInput.value.trim();
+            const newTavilyApiKey = document.getElementById('tavily-api-key').value.trim();
+            const newTavilyEnabled = tavilySearchInput.checked;
             
-            if (apiKey) {
+            if (!newApiKey) {
+                alert('请输入API密钥');
+                return;
+            }
+            
+            if (!newApiKey.match(/^[A-Za-z0-9-_]{30,}$/)) {
+                alert('API密钥格式无效，请检查后重新输入');
+                return;
+            }
+            
+            // 显示加载状态
+            const saveBtn = document.querySelector('.modal-btn.save');
+            const originalText = saveBtn.textContent;
+            saveBtn.textContent = '正在验证...';
+            saveBtn.disabled = true;
+            
+            try {
+                // 验证API密钥是否有效
+                const response = await fetch('https://api.x.ai/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${newApiKey}`
+                    },
+                    body: JSON.stringify({
+                        model: 'grok-3-beta',
+                        messages: [{role: 'user', content: 'Hi'}],
+                        max_tokens: 1
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('API密钥验证失败');
+                }
+                
+                // 验证成功，保存设置
+                apiKey = newApiKey;
+                tavilyApiKey = newTavilyApiKey;
+                tavilyEnabled = newTavilyEnabled;
+                
                 localStorage.setItem('api_key', apiKey);
                 localStorage.setItem('tavily_api_key', tavilyApiKey);
                 localStorage.setItem('tavily_enabled', tavilyEnabled);
                 
-                // 显示加载状态
-                const saveBtn = document.querySelector('.modal-btn.save');
-                const originalText = saveBtn.textContent;
-                saveBtn.textContent = '正在验证...';
-                saveBtn.disabled = true;
+                // 显示成功通知
+                const notification = document.createElement('div');
+                notification.className = 'notification success';
+                notification.textContent = 'API密钥验证成功';
+                document.body.appendChild(notification);
                 
-                socket.emit('update_settings', { 
-                    api_key: apiKey,
-                    tavily_api_key: tavilyApiKey,
-                    tavily_enabled: tavilyEnabled
-                });
+                // 3秒后移除通知
+                setTimeout(() => {
+                    notification.style.opacity = '0';
+                    setTimeout(() => notification.remove(), 300);
+                }, 3000);
                 
-                // 不立即关闭，等待服务器响应
-            } else {
-                alert('请输入有效的API密钥');
+                closeSettingsModal();
+            } catch (error) {
+                alert(error.message || 'API密钥验证失败，请检查后重试');
+            } finally {
+                saveBtn.textContent = originalText;
+                saveBtn.disabled = false;
             }
         }
 

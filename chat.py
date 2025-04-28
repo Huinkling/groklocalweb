@@ -240,21 +240,45 @@ def handle_delete_conversation(data):
             ]
         })
 
-@socketio.on('update_settings')
-def handle_settings_update(data):
-    if 'api_key' in data:
-        api_key = data['api_key']
-        user_api_keys[request.sid] = api_key
-        # 验证API密钥是否有效
-        if api_key:
-            # 发送确认消息给客户端
-            socketio.emit('api_key_updated', {'status': 'success', 'message': 'API密钥已更新，可以开始对话'})
+@socketio.on('send_message')
+def handle_message(data):
+    try:
+        message = data['message']
+        start_time = time.time()
+        
+        # 获取会话历史
+        conversation_id = user_conversations.get(request.sid)
+        conversation = conversations.get(conversation_id, [])
+        
+        # 添加用户消息到会话历史
+        conversation.append({"role": "user", "content": message})
+        
+        # 调用API获取响应
+        response = get_chat_response(conversation)
+        
+        if response:
+            # 计算响应时间和token数量
+            response_time = round(time.time() - start_time, 2)
+            token_count = len(response.split()) # 简单估算
+            
+            # 添加助手回复到会话历史
+            conversation.append({"role": "assistant", "content": response})
+            
+            # 更新会话历史
+            conversations[conversation_id] = conversation
+            
+            # 发送响应给客户端
+            socketio.emit('response', {
+                'message': response,
+                'conversation_id': conversation_id,
+                'response_time': response_time,
+                'token_count': token_count
+            })
         else:
-            socketio.emit('api_key_updated', {'status': 'error', 'message': 'API密钥不能为空'})
-    if 'tavily_api_key' in data:
-        user_tavily_api_keys[request.sid] = data['tavily_api_key']
-    if 'tavily_enabled' in data:
-        user_tavily_settings[request.sid] = data['tavily_enabled']
+            socketio.emit('error', {'message': '获取响应失败，请检查API密钥是否有效'})
+    except Exception as e:
+        logger.error(f'处理消息时发生错误: {str(e)}')
+        socketio.emit('error', {'message': '处理消息时发生错误'})
 
 @socketio.on('send_message')
 def handle_message(data):
