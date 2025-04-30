@@ -678,11 +678,27 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script>
-        const socket = io({
+        // 获取当前URL的主机部分，确保在部署环境中正确连接
+        const host = window.location.hostname;
+        const port = window.location.port;
+        const protocol = window.location.protocol;
+        
+        // 动态构建WebSocket连接URL
+        const socketUrl = port ? `${protocol}//${host}:${port}` : `${protocol}//${host}`;
+        console.log('连接到WebSocket服务器:', socketUrl);
+        
+        const socket = io(socketUrl, {
             transports: ['websocket', 'polling'],
-            reconnectionAttempts: 5,
+            reconnectionAttempts: 10,
             reconnectionDelay: 1000,
-            timeout: 10000
+            timeout: 20000,
+            autoConnect: true
+        });
+        
+        // 添加连接状态日志
+        socket.on('connect', () => {
+            console.log('WebSocket连接成功，ID:', socket.id);
+            showNotification('服务器连接成功', 'success');
         });
         const chatContainer = document.getElementById('chat-container');
         const userInput = document.getElementById('user-input');
@@ -761,12 +777,44 @@
         // 配置WebSocket连接
         socket.on('connect_error', (error) => {
             console.error('WebSocket连接错误:', error);
-            socket.connect();
+            showNotification('服务器连接失败，正在重试...', 'error');
+            // 延迟重连以避免连续失败
+            setTimeout(() => {
+                socket.connect();
+            }, 2000);
         });
 
-        socket.on('disconnect', () => {
-            console.log('WebSocket断开连接，尝试重新连接...');
-            socket.connect();
+        socket.on('disconnect', (reason) => {
+            console.log('WebSocket断开连接，原因:', reason);
+            showNotification('服务器连接断开，正在重新连接...', 'error');
+            if (reason === 'io server disconnect') {
+                // 服务器主动断开连接，需要手动重连
+                socket.connect();
+            }
+            // 其他情况socket.io会自动尝试重连
+        });
+        
+        // 添加重连尝试事件监听
+        socket.on('reconnect_attempt', (attemptNumber) => {
+            console.log(`尝试重新连接 (${attemptNumber}/${socket.io.opts.reconnectionAttempts})`);
+        });
+        
+        socket.on('reconnect', (attemptNumber) => {
+            console.log(`重新连接成功，尝试次数: ${attemptNumber}`);
+            showNotification('服务器重新连接成功', 'success');
+            // 重新发送API密钥
+            if (apiKey) {
+                socket.emit('update_settings', { api_key: apiKey });
+            }
+        });
+        
+        socket.on('reconnect_error', (error) => {
+            console.error('重新连接失败:', error);
+        });
+        
+        socket.on('reconnect_failed', () => {
+            console.error('重新连接失败，已达到最大尝试次数');
+            showNotification('服务器连接失败，请刷新页面重试', 'error');
         });
 
         // 打开设置弹窗
@@ -875,9 +923,42 @@
             
             if (!checkApiKey()) return;
             
+            // 禁用输入框和按钮，防止重复发送
+            userInput.disabled = true;
+            document.querySelector('#input-container button').disabled = true;
+            
             addMessage(message, true);
             thinking.style.display = 'block';
-            socket.emit('send_message', { message: message });
+            
+            // 添加超时处理
+            const messageTimeout = setTimeout(() => {
+                thinking.style.display = 'none';
+                showNotification('服务器响应超时，请检查网络连接', 'error');
+                userInput.disabled = false;
+                document.querySelector('#input-container button').disabled = false;
+            }, 30000);
+            
+            // 发送消息并记录日志
+            console.log('发送消息:', message);
+            socket.emit('send_message', { 
+                message: message,
+                api_key: apiKey, // 确保每次请求都发送API密钥
+                tavily_enabled: tavilyEnabled,
+                tavily_api_key: tavilyApiKey
+            }, (acknowledgement) => {
+                // 清除超时
+                clearTimeout(messageTimeout);
+                
+                // 处理确认回调
+                if (acknowledgement && acknowledgement.status === 'error') {
+                    thinking.style.display = 'none';
+                    showNotification(acknowledgement.message || '消息发送失败', 'error');
+                    console.error('消息发送失败:', acknowledgement);
+                } else {
+                    console.log('消息已成功发送到服务器');
+                }
+            });
+            
             userInput.value = '';
         }
 
@@ -921,21 +1002,42 @@
         socket.emit('get_history');
 
         socket.on('response', (data) => {
+            console.log('收到响应:', data);
             thinking.style.display = 'none';
+            
+            // 重新启用输入控件
+            userInput.disabled = false;
+            document.querySelector('#input-container button').disabled = false;
+            
+            // 检查响应是否包含错误
+            if (data.error) {
+                showNotification(data.error || '获取响应时发生错误', 'error');
+                console.error('API响应错误:', data.error);
+                return;
+            }
+            
+            // 创建消息元素
             const message = document.createElement('div');
             message.className = 'message assistant-message';
             const content = document.createElement('div');
-            content.textContent = data.message;
+            content.textContent = data.message || '无响应内容';
             message.appendChild(content);
             
+            // 添加响应信息
             const info = document.createElement('div');
             info.className = 'message-info';
-            info.textContent = ` ${data.response_time}s | ${data.token_count}tokens`;
+            info.textContent = ` ${data.response_time || '?'}s | ${data.token_count || '?'}tokens`;
             message.appendChild(info);
             
+            // 添加到聊天容器
             chatContainer.appendChild(message);
             chatContainer.scrollTop = chatContainer.scrollHeight;
-            currentConversationId = data.conversation_id;
+            
+            // 更新会话ID
+            if (data.conversation_id) {
+                currentConversationId = data.conversation_id;
+                console.log('当前会话ID:', currentConversationId);
+            }
         });
 
         socket.on('update_history', (data) => {
@@ -949,9 +1051,37 @@
         });
 
         socket.on('error', (data) => {
+            console.error('Socket错误事件:', data);
             thinking.style.display = 'none';
-            const errorMessage = data.message || '获取响应时发生错误';
-            addMessage(errorMessage, false);
+            
+            // 重新启用输入控件
+            userInput.disabled = false;
+            document.querySelector('#input-container button').disabled = false;
+            
+            // 提取错误信息
+            let errorMessage = '';
+            if (typeof data === 'string') {
+                errorMessage = data;
+            } else if (data && data.message) {
+                errorMessage = data.message;
+            } else if (data && data.error) {
+                errorMessage = data.error;
+            } else {
+                errorMessage = '获取响应时发生错误，请检查网络连接或API密钥';
+            }
+            
+            // 显示错误通知
+            showNotification(errorMessage, 'error');
+            
+            // 在聊天窗口中显示错误信息
+            const message = document.createElement('div');
+            message.className = 'message assistant-message';
+            const content = document.createElement('div');
+            content.textContent = `错误: ${errorMessage}`;
+            content.style.color = 'var(--error-color)';
+            message.appendChild(content);
+            chatContainer.appendChild(message);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
         });
         
         // 监听API密钥更新事件
@@ -1004,7 +1134,17 @@
         socket.on('conversation_reset', () => {
             // 重置完成后的回调处理
             console.log('Session has been reset');
-        })
+        });
+        
+        // 处理消息接收确认
+        socket.on('message_received', (data) => {
+            console.log('服务器已接收消息:', data);
+            // 添加UI反馈，显示服务器正在处理
+            if (data.status === 'processing') {
+                thinking.style.display = 'block';
+                thinking.textContent = 'Grok正在思考中...';
+            }
+        });
 
         document.getElementById('new-chat-btn').addEventListener('click', startNewChat);
     </script>

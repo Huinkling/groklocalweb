@@ -1,1 +1,1 @@
-web: gunicorn --worker-class eventlet -w 1 chat:app
+web: gunicorn --worker-class eventlet -w 1 --log-file=- --access-logfile=- --error-logfile=- --timeout 120 chat:app

@@ -6,6 +6,7 @@ import json
 import os
 import logging
 import sys
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -240,61 +241,37 @@ def handle_delete_conversation(data):
             ]
         })
 
-@socketio.on('send_message')
-def handle_message(data):
-    try:
-        message = data['message']
-        start_time = time.time()
-        
-        # 获取会话历史
-        conversation_id = user_conversations.get(request.sid)
-        conversation = conversations.get(conversation_id, [])
-        
-        # 添加用户消息到会话历史
-        conversation.append({"role": "user", "content": message})
-        
-        # 调用API获取响应
-        response = get_chat_response(conversation)
-        
-        if response:
-            # 计算响应时间和token数量
-            response_time = round(time.time() - start_time, 2)
-            token_count = len(response.split()) # 简单估算
-            
-            # 添加助手回复到会话历史
-            conversation.append({"role": "assistant", "content": response})
-            
-            # 更新会话历史
-            conversations[conversation_id] = conversation
-            
-            # 发送响应给客户端
-            socketio.emit('response', {
-                'message': response,
-                'conversation_id': conversation_id,
-                'response_time': response_time,
-                'token_count': token_count
-            })
-        else:
-            socketio.emit('error', {'message': '获取响应失败，请检查API密钥是否有效'})
-    except Exception as e:
-        logger.error(f'处理消息时发生错误: {str(e)}')
-        socketio.emit('error', {'message': '处理消息时发生错误'})
+# 删除重复的函数定义
 
 @socketio.on('send_message')
 def handle_message(data):
     try:
         conversation_id = get_conversation_id()
         
-        # Check if API key is set
-        api_key = user_api_keys.get(request.sid)
+        # 从请求数据中获取API密钥，如果前端每次请求都发送API密钥，优先使用
+        api_key = data.get('api_key') or user_api_keys.get(request.sid)
         if not api_key:
-            socketio.emit('error', {'message': '请先设置您的API密钥'})
+            logger.error('API密钥未设置')
+            socketio.emit('error', {'message': '请先设置您的API密钥'}, room=request.sid)
             return
+        
+        # 更新会话中的API密钥
+        user_api_keys[request.sid] = api_key
+        
+        # 从请求数据中获取Tavily设置
+        if 'tavily_enabled' in data:
+            user_tavily_settings[request.sid] = data.get('tavily_enabled')
+        if 'tavily_api_key' in data and data.get('tavily_api_key'):
+            user_tavily_api_keys[request.sid] = data.get('tavily_api_key')
         
         # 限制消息长度，防止过大的请求
         if len(data.get('message', '')) > 4000:
-            socketio.emit('error', {'message': '消息过长，请缩短您的消息'})
+            logger.warning(f'消息过长: {len(data.get("message", ""))}字符')
+            socketio.emit('error', {'message': '消息过长，请缩短您的消息'}, room=request.sid)
             return
+        
+        # 记录请求信息
+        logger.info(f'收到消息请求: sid={request.sid}, conversation_id={conversation_id}')
         
         if conversation_id not in conversation_history:
             conversation_history[conversation_id] = {
@@ -317,12 +294,14 @@ def handle_message(data):
         if user_tavily_settings.get(request.sid, False):
             tavily_api_key = user_tavily_api_keys.get(request.sid)
             if tavily_api_key:
+                logger.info('使用Tavily搜索获取结果')
                 search_results = get_tavily_search_results(data['message'], tavily_api_key)
             else:
-                socketio.emit('error', {'message': 'Please set your Tavily API key first'})
+                logger.warning('Tavily搜索已启用但未设置API密钥')
+                socketio.emit('error', {'message': '请先设置您的Tavily API密钥'}, room=request.sid)
     except Exception as e:
         logger.error(f'处理消息时发生错误: {str(e)}')
-        socketio.emit('error', {'message': '处理消息时发生错误'})
+        socketio.emit('error', {'message': f'处理消息时发生错误: {str(e)}'}, room=request.sid)
         return
     
     try:
@@ -339,6 +318,9 @@ Please answer the user's question based on the search results above. If the sear
         else:
             system_message = 'You are a helpful assistant.'
         
+        # 记录系统提示信息长度
+        logger.info(f'系统提示信息长度: {len(system_message)}字符')
+        
         messages = [
             {
                 'role': 'system',
@@ -346,36 +328,65 @@ Please answer the user's question based on the search results above. If the sear
             }
         ] + conversation_history[conversation_id]['messages']
         
+        # 记录发送请求信息
+        logger.info(f'发送API请求: conversation_id={conversation_id}, 消息数量={len(messages)}')
+        
+        # 发送确认消息给客户端
+        socketio.emit('message_received', {'status': 'processing'}, room=request.sid)
+        
+        # 调用API获取响应
         response_data = send_message(messages, api_key)
         
+        # 检查响应中是否包含错误
+        if 'error' in response_data:
+            error_message = response_data['error']
+            logger.error(f'API响应错误: {error_message}')
+            socketio.emit('error', {'message': error_message}, room=request.sid)
+            return
+        
+        # 处理成功的响应
         if response_data and 'response' in response_data and 'choices' in response_data['response']:
-            assistant_message = response_data['response']['choices'][0]['message']['content']
-            # Add assistant response to history
-            conversation_history[conversation_id]['messages'].append({
-                'role': 'assistant',
-                'content': assistant_message
-            })
-            socketio.emit('response', {
-                'message': assistant_message,
-                'conversation_id': conversation_id,
-                'response_time': round(response_data['response_time'], 2),
-                'token_count': response_data['token_count']
-            })
+            # 提取助手回复内容
+            try:
+                assistant_message = response_data['response']['choices'][0]['message']['content']
+                logger.info(f'收到API响应: 长度={len(assistant_message)}字符')
+                
+                # 添加助手回复到会话历史
+                conversation_history[conversation_id]['messages'].append({
+                    'role': 'assistant',
+                    'content': assistant_message
+                })
+                
+                # 发送响应给客户端
+                socketio.emit('response', {
+                    'message': assistant_message,
+                    'conversation_id': conversation_id,
+                    'response_time': round(response_data['response_time'], 2),
+                    'token_count': response_data['token_count']
+                }, room=request.sid)
+                
+                # 更新会话历史列表
+                socketio.emit('update_history', {
+                    'conversations': [
+                        {
+                            'id': cid,
+                            'title': conv['title'],
+                            'timestamp': conv['timestamp']
+                        } for cid, conv in conversation_history.items()
+                    ]
+                }, room=request.sid)
+            except (KeyError, IndexError) as e:
+                logger.error(f'解析API响应时出错: {str(e)}')
+                logger.error(f'响应数据结构: {response_data}')
+                socketio.emit('error', {'message': '解析API响应时出错，请稍后再试'}, room=request.sid)
         else:
-            socketio.emit('error', {'message': 'API request failed, please check if your API key is correct'})
-            # Send updated history
-            socketio.emit('update_history', {
-                'conversations': [
-                    {
-                        'id': cid,
-                        'title': conv['title'],
-                        'timestamp': conv['timestamp']
-                    } for cid, conv in conversation_history.items()
-                ]
-            })
+            logger.error(f'API响应格式异常: {response_data}')
+            socketio.emit('error', {'message': 'API请求失败，请检查您的API密钥是否正确'}, room=request.sid)
     except Exception as e:
         logger.error(f'处理响应时发生错误: {str(e)}')
-        socketio.emit('error', {'message': '处理响应时发生错误'})
+        import traceback
+        logger.error(traceback.format_exc())
+        socketio.emit('error', {'message': f'处理响应时发生错误: {str(e)}'}, room=request.sid)
         return
 
 if __name__ == '__main__':
