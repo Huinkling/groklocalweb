@@ -699,6 +699,21 @@
         socket.on('connect', () => {
             console.log('WebSocket连接成功，ID:', socket.id);
             showNotification('服务器连接成功', 'success');
+            
+            // 连接成功后重新发送API密钥
+            if (apiKey) {
+                console.log('重新发送API密钥到服务器');
+                socket.emit('update_settings', { api_key: apiKey });
+            }
+            
+            // 如果有未完成的请求，显示提示
+            if (pendingRequests.length > 0) {
+                showNotification('连接已恢复，但之前的请求可能已丢失，请重新发送', 'error');
+                thinking.style.display = 'none';
+                userInput.disabled = false;
+                document.querySelector('#input-container button').disabled = false;
+                pendingRequests = [];
+            }
         });
         const chatContainer = document.getElementById('chat-container');
         const userInput = document.getElementById('user-input');
@@ -712,6 +727,8 @@
         let apiKey = localStorage.getItem('api_key');
         let tavilyApiKey = localStorage.getItem('tavily_api_key');
         let tavilyEnabled = localStorage.getItem('tavily_enabled') === 'true';
+        let pendingRequests = []; // 跟踪待处理的请求
+        let socketReconnecting = false; // 跟踪Socket是否正在重连
 
 
         // Check if API key is set and valid
@@ -929,37 +946,97 @@
             
             addMessage(message, true);
             thinking.style.display = 'block';
+            thinking.textContent = 'Grok正在思考中...';
             
-            // 添加超时处理
+            // 生成请求ID
+            const requestId = Date.now().toString();
+            pendingRequests.push(requestId);
+            
+            // 添加超时处理，增加超时时间到60秒
             const messageTimeout = setTimeout(() => {
-                thinking.style.display = 'none';
-                showNotification('服务器响应超时，请检查网络连接', 'error');
-                userInput.disabled = false;
-                document.querySelector('#input-container button').disabled = false;
-            }, 30000);
+                // 检查请求是否仍在待处理列表中
+                const requestIndex = pendingRequests.indexOf(requestId);
+                if (requestIndex !== -1) {
+                    pendingRequests.splice(requestIndex, 1);
+                    thinking.style.display = 'none';
+                    showNotification('服务器响应超时，请检查网络连接或稍后重试', 'error');
+                    userInput.disabled = false;
+                    document.querySelector('#input-container button').disabled = false;
+                    
+                    // 在聊天窗口显示错误信息
+                    const message = document.createElement('div');
+                    message.className = 'message assistant-message';
+                    const content = document.createElement('div');
+                    content.textContent = `错误: 响应超时，请检查网络连接或稍后重试`;
+                    content.style.color = 'var(--error-color)';
+                    message.appendChild(content);
+                    chatContainer.appendChild(message);
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                }
+            }, 60000);
             
             // 发送消息并记录日志
-            console.log('发送消息:', message);
+            console.log('发送消息:', message, '请求ID:', requestId);
+            
+            // 检查Socket连接状态
+            if (!socket.connected) {
+                console.log('Socket未连接，尝试重新连接...');
+                socket.connect();
+                
+                // 添加连接超时
+                const connectTimeout = setTimeout(() => {
+                    if (!socket.connected) {
+                        clearTimeout(messageTimeout);
+                        thinking.style.display = 'none';
+                        showNotification('无法连接到服务器，请检查网络连接后刷新页面', 'error');
+                        userInput.disabled = false;
+                        document.querySelector('#input-container button').disabled = false;
+                    }
+                }, 5000);
+                
+                // 连接成功后发送消息
+                socket.once('connect', () => {
+                    clearTimeout(connectTimeout);
+                    sendMessageToServer(message, requestId, messageTimeout);
+                });
+            } else {
+                sendMessageToServer(message, requestId, messageTimeout);
+            }
+            
+            userInput.value = '';
+        }
+        
+        // 提取发送消息到服务器的逻辑
+        function sendMessageToServer(message, requestId, messageTimeout) {
             socket.emit('send_message', { 
                 message: message,
                 api_key: apiKey, // 确保每次请求都发送API密钥
                 tavily_enabled: tavilyEnabled,
-                tavily_api_key: tavilyApiKey
+                tavily_api_key: tavilyApiKey,
+                request_id: requestId
             }, (acknowledgement) => {
                 // 清除超时
                 clearTimeout(messageTimeout);
                 
                 // 处理确认回调
                 if (acknowledgement && acknowledgement.status === 'error') {
+                    // 从待处理列表中移除
+                    const requestIndex = pendingRequests.indexOf(requestId);
+                    if (requestIndex !== -1) {
+                        pendingRequests.splice(requestIndex, 1);
+                    }
+                    
                     thinking.style.display = 'none';
                     showNotification(acknowledgement.message || '消息发送失败', 'error');
                     console.error('消息发送失败:', acknowledgement);
+                    
+                    // 重新启用输入控件
+                    userInput.disabled = false;
+                    document.querySelector('#input-container button').disabled = false;
                 } else {
-                    console.log('消息已成功发送到服务器');
+                    console.log('消息已成功发送到服务器，请求ID:', requestId);
                 }
             });
-            
-            userInput.value = '';
         }
 
         function loadConversation(conversationId) {
@@ -1008,6 +1085,15 @@
             // 重新启用输入控件
             userInput.disabled = false;
             document.querySelector('#input-container button').disabled = false;
+            
+            // 从待处理列表中移除请求
+            if (data.request_id) {
+                const requestIndex = pendingRequests.indexOf(data.request_id);
+                if (requestIndex !== -1) {
+                    pendingRequests.splice(requestIndex, 1);
+                    console.log('请求已完成:', data.request_id);
+                }
+            }
             
             // 检查响应是否包含错误
             if (data.error) {
@@ -1058,6 +1144,15 @@
             userInput.disabled = false;
             document.querySelector('#input-container button').disabled = false;
             
+            // 从待处理列表中移除请求
+            if (data.request_id) {
+                const requestIndex = pendingRequests.indexOf(data.request_id);
+                if (requestIndex !== -1) {
+                    pendingRequests.splice(requestIndex, 1);
+                    console.log('请求出错:', data.request_id);
+                }
+            }
+            
             // 提取错误信息
             let errorMessage = '';
             if (typeof data === 'string') {
@@ -1082,6 +1177,18 @@
             message.appendChild(content);
             chatContainer.appendChild(message);
             chatContainer.scrollTop = chatContainer.scrollHeight;
+            
+            // 如果是连接相关错误，尝试重新连接
+            if (errorMessage.includes('连接') || errorMessage.includes('网络')) {
+                if (!socketReconnecting) {
+                    socketReconnecting = true;
+                    console.log('尝试重新连接Socket...');
+                    setTimeout(() => {
+                        socket.connect();
+                        socketReconnecting = false;
+                    }, 2000);
+                }
+            }
         });
         
         // 监听API密钥更新事件
@@ -1143,8 +1250,31 @@
             if (data.status === 'processing') {
                 thinking.style.display = 'block';
                 thinking.textContent = 'Grok正在思考中...';
+                
+                // 记录请求ID，用于后续跟踪
+                if (data.request_id) {
+                    console.log('服务器确认处理请求:', data.request_id);
+                    // 确保请求ID在待处理列表中
+                    if (pendingRequests.indexOf(data.request_id) === -1) {
+                        pendingRequests.push(data.request_id);
+                    }
+                }
             }
         });
+        
+        // 添加心跳检测，确保连接稳定
+        setInterval(() => {
+            if (socket.connected) {
+                console.log('WebSocket连接正常');
+            } else if (!socketReconnecting) {
+                console.log('WebSocket连接已断开，尝试重新连接...');
+                socketReconnecting = true;
+                socket.connect();
+                setTimeout(() => {
+                    socketReconnecting = false;
+                }, 5000);
+            }
+        }, 30000); // 每30秒检查一次
 
         document.getElementById('new-chat-btn').addEventListener('click', startNewChat);
     </script>
