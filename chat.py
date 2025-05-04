@@ -42,77 +42,122 @@ API_URL = os.getenv('API_URL', 'https://api.x.ai/v1/chat/completions')
 # Store chat history, user API keys and Tavily settings
 # 使用类来管理会话，提高内存效率
 class SessionManager:
-    def __init__(self, max_conversations=100, max_messages_per_conversation=50):
+    def __init__(self, max_conversations=50, max_messages_per_conversation=30):
         self.conversation_history = {}
         self.user_api_keys = {}
         self.user_tavily_settings = {}
         self.user_tavily_api_keys = {}
         self.max_conversations = max_conversations
         self.max_messages_per_conversation = max_messages_per_conversation
-        self._recursion_depth = 0
-        self._max_recursion_depth = 10
     
     def cleanup_old_conversations(self):
         """清理旧会话以节省内存"""
-        if len(self.conversation_history) > self.max_conversations:
-            # 按时间戳排序并保留最新的会话
-            sorted_convs = sorted(
-                self.conversation_history.items(),
-                key=lambda x: x[1].get('timestamp', ''),
-                reverse=True
-            )
-            # 保留最新的max_conversations个会话
-            self.conversation_history = dict(sorted_convs[:self.max_conversations])
-            logger.info(f"清理了 {len(sorted_convs) - self.max_conversations} 个旧会话")
+        try:
+            if len(self.conversation_history) > self.max_conversations:
+                # 按时间戳排序并保留最新的会话
+                sorted_convs = sorted(
+                    self.conversation_history.items(),
+                    key=lambda x: x[1].get('timestamp', ''),
+                    reverse=True
+                )[:self.max_conversations]
+                # 直接创建新字典而不是修改现有字典
+                self.conversation_history = {cid: conv for cid, conv in sorted_convs}
+                logger.info(f"已清理旧会话，当前会话数: {len(self.conversation_history)}")
+        except Exception as e:
+            logger.error(f"清理旧会话时发生错误: {str(e)}")
     
     def add_message_to_conversation(self, conversation_id, message):
         """添加消息到会话，并在必要时清理旧消息"""
-        # 检查递归深度
-        self._recursion_depth += 1
-        if self._recursion_depth > self._max_recursion_depth:
-            logger.error(f"达到最大递归深度 {self._max_recursion_depth}")
-            self._recursion_depth = 0
-            raise RuntimeError("达到最大递归深度限制")
-            
         try:
+            # 如果会话不存在，创建新会话
             if conversation_id not in self.conversation_history:
                 self.conversation_history[conversation_id] = {
                     'messages': [],
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'title': message.get('content', '')[:30] + '...' if len(message.get('content', '')) > 30 else message.get('content', ''),
-                    'status': 'active'
+                    'title': message.get('content', '')[:30] + '...' if len(message.get('content', '')) > 30 else message.get('content', '')
                 }
             
-            # 添加新消息
-            self.conversation_history[conversation_id]['messages'].append(message)
+            conv = self.conversation_history[conversation_id]
+            messages = conv['messages']
             
-            # 如果消息数量超过限制，删除最旧的消息
-            messages = self.conversation_history[conversation_id]['messages']
-            if len(messages) > self.max_messages_per_conversation:
+            # 如果消息数量超过限制，直接移除旧消息
+            if len(messages) >= self.max_messages_per_conversation:
                 # 保留系统消息和最新的消息
-                system_messages = [msg for msg in messages if msg['role'] == 'system']
-                other_messages = [msg for msg in messages if msg['role'] != 'system']
+                system_messages = [msg for msg in messages if msg.get('role') == 'system']
+                other_messages = [msg for msg in messages if msg.get('role') != 'system']
                 
-                # 计算需要保留的非系统消息数量
-                keep_count = self.max_messages_per_conversation - len(system_messages)
+                # 计算要保留的非系统消息数量
+                keep_count = max(1, self.max_messages_per_conversation - len(system_messages))
+                # 只保留最新的消息
                 kept_messages = system_messages + other_messages[-keep_count:]
                 
-                self.conversation_history[conversation_id]['messages'] = kept_messages
-                logger.info(f"会话 {conversation_id} 清理了 {len(messages) - len(kept_messages)} 条旧消息")
-        finally:
-            # 确保递归深度计数器被重置
-            self._recursion_depth -= 1
+                # 直接替换消息列表
+                conv['messages'] = kept_messages
+            
+            # 添加新消息
+            conv['messages'].append(message)
+            # 更新时间戳
+            conv['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 定期清理旧会话
+            if len(self.conversation_history) > self.max_conversations:
+                self.cleanup_old_conversations()
+                
+        except Exception as e:
+            logger.error(f"添加消息到会话时发生错误: {str(e)}")
+            raise
     
     def get_conversation_messages(self, conversation_id):
         """获取会话消息"""
-        return self.conversation_history.get(conversation_id, {}).get('messages', [])
+        try:
+            return self.conversation_history.get(conversation_id, {}).get('messages', [])
+        except Exception as e:
+            logger.error(f"获取会话消息时发生错误: {str(e)}")
+            return []
+            
+    def get_conversation_count(self):
+        """获取当前会话数量"""
+        return len(self.conversation_history)
+        
+    def clear_old_data(self):
+        """定期清理过期数据"""
+        try:
+            # 清理24小时前的会话
+            current_time = datetime.now()
+            old_conversations = []
+            
+            for cid, conv in self.conversation_history.items():
+                try:
+                    conv_time = datetime.strptime(conv['timestamp'], '%Y-%m-%d %H:%M:%S')
+                    if (current_time - conv_time).days >= 1:
+                        old_conversations.append(cid)
+                except (ValueError, KeyError):
+                    continue
+            
+            for cid in old_conversations:
+                del self.conversation_history[cid]
+                
+            if old_conversations:
+                logger.info(f"已清理 {len(old_conversations)} 个过期会话")
+        except Exception as e:
+            logger.error(f"清理过期数据时发生错误: {str(e)}")
 
-# 初始化会话管理器
-session_manager = SessionManager()
+# 初始化会话管理器，减小默认值以适应云环境
+session_manager = SessionManager(max_conversations=50, max_messages_per_conversation=30)
 conversation_history = session_manager.conversation_history
 user_api_keys = session_manager.user_api_keys
 user_tavily_settings = session_manager.user_tavily_settings
 user_tavily_api_keys = session_manager.user_tavily_api_keys
+
+# 添加定期清理任务
+def cleanup_task():
+    while True:
+        try:
+            session_manager.clear_old_data()
+            time.sleep(3600)  # 每小时清理一次
+        except Exception as e:
+            logger.error(f"清理任务执行出错: {str(e)}")
+            time.sleep(60)  # 出错后等待1分钟再试
 
 def get_tavily_search_results(query, api_key):
     if not api_key:
@@ -494,12 +539,19 @@ if __name__ == '__main__':
     from gevent import monkey
     monkey.patch_all()
     
+    # 启动清理任务
+    from threading import Thread
+    cleanup_thread = Thread(target=cleanup_task, daemon=True)
+    cleanup_thread.start()
+    
     # 从环境变量获取端口，适应云平台要求
     port = int(os.getenv('PORT', 10000))
     
     # 记录启动信息
     logger.info(f"应用启动于端口: {port}")
     logger.info(f"API URL: {API_URL}")
+    logger.info(f"最大会话数: {session_manager.max_conversations}")
+    logger.info(f"每个会话最大消息数: {session_manager.max_messages_per_conversation}")
     
     # 在云环境中，通常会自动分配主机和端口
     socketio.run(
