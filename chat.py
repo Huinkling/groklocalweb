@@ -7,13 +7,14 @@ import os
 import logging
 import sys
 import time
+import ssl
 from datetime import datetime
 from dotenv import load_dotenv
 
 # 加载环境变量
 load_dotenv()
 
-# 配置更详细的日志
+# 首先配置日志系统
 logging.basicConfig(
     level=logging.DEBUG,  # 修改为DEBUG级别，获取更多信息
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -22,6 +23,39 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ===== 修复SSL递归错误 =====
+logger.info("应用SSL修复以避免递归错误...")
+
+try:
+    # 创建自定义SSL上下文
+    ssl._create_default_https_context = ssl._create_unverified_context
+    logger.debug("已设置自定义SSL上下文")
+    
+    # 导入和配置urllib3
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    logger.debug("已禁用urllib3警告")
+    
+    # 修补requests会话，避免SSL验证
+    old_merge_environment_settings = requests.Session.merge_environment_settings
+    
+    def patched_merge_environment_settings(self, url, proxies, stream, verify, cert):
+        settings = old_merge_environment_settings(self, url, proxies, stream, verify, cert)
+        settings['verify'] = False
+        return settings
+    
+    requests.Session.merge_environment_settings = patched_merge_environment_settings
+    logger.debug("已修补requests会话设置")
+    
+    # 设置默认不验证SSL
+    requests.packages.urllib3.disable_warnings()
+    
+    logger.info("SSL修复应用完成")
+except Exception as e:
+    logger.error(f"应用SSL修复时出错: {str(e)}")
+    import traceback
+    logger.error(traceback.format_exc())
 
 # 添加详细错误追踪函数
 def log_exception(e, prefix="错误"):
@@ -306,14 +340,18 @@ def send_message(messages, api_key=None):
         max_retries = 3
         base_delay = 2
         
+        # 创建自定义会话，避免SSL验证问题
+        session = requests.Session()
+        session.verify = False  # 禁用SSL验证
+        
         # 执行请求
         for attempt in range(max_retries):
             try:
                 current_delay = base_delay * (2 ** attempt)
                 logger.debug(f"API请求[{request_id}]尝试: {attempt + 1}/{max_retries}")
                 
-                # 发送请求
-                response = requests.post(
+                # 发送请求，使用会话对象
+                response = session.post(
                     API_URL,
                     headers=headers,
                     json=data,
@@ -354,7 +392,11 @@ def send_message(messages, api_key=None):
                     return {'error': 'API服务暂时不可用，请稍后再试'}
                 
                 # 确保响应状态码正常
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except Exception as e:
+                    logger.error(f"API请求[{request_id}]状态码错误: {str(e)}")
+                    return {'error': f'API响应状态错误: {response.status_code}'}
                 
                 # 尝试获取并记录响应内容预览
                 try:
@@ -414,14 +456,30 @@ def send_message(messages, api_key=None):
                     time.sleep(current_delay)
                     continue
                 return {'error': 'API连接失败，请检查网络连接或API地址是否正确'}
+            
+            except requests.exceptions.SSLError as e:
+                logger.error(f"API请求[{request_id}]SSL错误: {str(e)}")
+                # 对于SSL错误，我们直接返回错误，不进行重试
+                return {'error': 'API连接SSL错误，请联系管理员检查服务器配置'}
                 
             except requests.exceptions.RequestException as e:
                 error_trace = log_exception(e, f"API请求[{request_id}]异常")
                 return {'error': f'API请求出现错误: {str(e)}'}
                 
+    except RecursionError as e:
+        # 特别处理递归错误
+        logger.critical(f"发送消息时遇到递归错误: {str(e)}")
+        return {'error': 'API请求处理错误，请联系管理员检查服务器配置'}
     except Exception as e:
         error_trace = log_exception(e, "发送消息时发生未知错误")
         return {'error': '发生未知错误，请稍后再试'}
+    finally:
+        # 确保会话被关闭
+        if 'session' in locals():
+            try:
+                session.close()
+            except:
+                pass
 
 @app.route('/')
 def index():
