@@ -42,12 +42,13 @@ API_URL = os.getenv('API_URL', 'https://api.x.ai/v1/chat/completions')
 # Store chat history, user API keys and Tavily settings
 # 使用类来管理会话，提高内存效率
 class SessionManager:
-    def __init__(self, max_conversations=100):
+    def __init__(self, max_conversations=100, max_messages_per_conversation=50):
         self.conversation_history = {}
         self.user_api_keys = {}
         self.user_tavily_settings = {}
         self.user_tavily_api_keys = {}
         self.max_conversations = max_conversations
+        self.max_messages_per_conversation = max_messages_per_conversation
     
     def cleanup_old_conversations(self):
         """清理旧会话以节省内存"""
@@ -61,6 +62,37 @@ class SessionManager:
             # 保留最新的max_conversations个会话
             self.conversation_history = dict(sorted_convs[:self.max_conversations])
             logger.info(f"清理了 {len(sorted_convs) - self.max_conversations} 个旧会话")
+    
+    def add_message_to_conversation(self, conversation_id, message):
+        """添加消息到会话，并在必要时清理旧消息"""
+        if conversation_id not in self.conversation_history:
+            self.conversation_history[conversation_id] = {
+                'messages': [],
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'title': message.get('content', '')[:30] + '...' if len(message.get('content', '')) > 30 else message.get('content', ''),
+                'status': 'active'
+            }
+        
+        # 添加新消息
+        self.conversation_history[conversation_id]['messages'].append(message)
+        
+        # 如果消息数量超过限制，删除最旧的消息
+        messages = self.conversation_history[conversation_id]['messages']
+        if len(messages) > self.max_messages_per_conversation:
+            # 保留系统消息和最新的消息
+            system_messages = [msg for msg in messages if msg['role'] == 'system']
+            other_messages = [msg for msg in messages if msg['role'] != 'system']
+            
+            # 计算需要保留的非系统消息数量
+            keep_count = self.max_messages_per_conversation - len(system_messages)
+            kept_messages = system_messages + other_messages[-keep_count:]
+            
+            self.conversation_history[conversation_id]['messages'] = kept_messages
+            logger.info(f"会话 {conversation_id} 清理了 {len(messages) - len(kept_messages)} 条旧消息")
+    
+    def get_conversation_messages(self, conversation_id):
+        """获取会话消息"""
+        return self.conversation_history.get(conversation_id, {}).get('messages', [])
 
 # 初始化会话管理器
 session_manager = SessionManager()
@@ -381,12 +413,13 @@ Please answer the user's question based on the search results above. If the sear
         logger.info(f'[ID:{request_id}] 系统提示信息长度: {len(system_message)}字符')
         
         # 构建完整消息列表
+        current_messages = session_manager.get_conversation_messages(conversation_id)
         messages = [
             {
                 'role': 'system',
                 'content': system_message
             }
-        ] + conversation_history[conversation_id]['messages']
+        ] + current_messages
         
         # 记录发送请求信息
         logger.info(f'[ID:{request_id}] 发送API请求: conversation_id={conversation_id}, 消息数量={len(messages)}')
