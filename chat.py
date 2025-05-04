@@ -259,28 +259,97 @@ def cleanup_task():
             time.sleep(60)  # 出错后等待1分钟再试
 
 def get_tavily_search_results(query, api_key):
+    """使用Tavily API进行搜索，使用urllib库而非requests"""
     if not api_key:
+        logger.warning("未设置Tavily API密钥")
         return None
-    url = 'https://api.tavily.com/search'
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {api_key}'
-    }
-    data = {
-        'query': query,
-        'search_depth': 'advanced',
-        'include_answer': True
-    }
+    
+    request_id = datetime.now().strftime('%Y%m%d%H%M%S')
+    logger.debug(f"Tavily请求[{request_id}]开始: 查询={query[:30]}...")
+    
     try:
-        # 添加超时设置，避免长时间等待
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.Timeout:
-        logger.error("Tavily API 请求超时")
+        # 构建请求URL和数据
+        url = 'https://api.tavily.com/search'
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}',
+            'User-Agent': 'Grok-Web-Client/1.0'
+        }
+        data = {
+            'query': query,
+            'search_depth': 'advanced',
+            'include_answer': True
+        }
+        
+        # 转换数据为JSON
+        data_json = json.dumps(data)
+        
+        # 创建SSL上下文
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        # 解析URL
+        host = 'api.tavily.com'
+        path = '/search'
+        
+        # 发送请求
+        conn = http.client.HTTPSConnection(host, context=ctx, timeout=10)
+        logger.debug(f"Tavily请求[{request_id}]连接到: {host}")
+        
+        try:
+            start_time = datetime.now()
+            conn.request("POST", path, data_json, headers)
+            
+            # 获取响应
+            response = conn.getresponse()
+            status = response.status
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            logger.debug(f"Tavily请求[{request_id}]收到响应: 状态码={status}, 耗时={elapsed_time:.2f}秒")
+            
+            # 检查响应状态
+            if status != 200:
+                response_body = response.read().decode('utf-8')
+                logger.error(f"Tavily请求[{request_id}]失败: 状态码={status}")
+                logger.debug(f"Tavily请求[{request_id}]错误详情: {response_body[:200]}")
+                return None
+            
+            # 读取并解析响应
+            response_data = response.read().decode('utf-8')
+            result = json.loads(response_data)
+            
+            # 验证响应格式
+            if not isinstance(result, dict):
+                logger.error(f"Tavily请求[{request_id}]响应格式错误: 不是字典类型")
+                return None
+            
+            # 检查结果中是否包含answer字段
+            if 'answer' in result:
+                answer_length = len(result['answer'])
+                logger.info(f"Tavily请求[{request_id}]成功: 回答长度={answer_length}字符")
+                return result
+            else:
+                logger.warning(f"Tavily请求[{request_id}]缺少answer字段")
+                return None
+                
+        finally:
+            # 确保连接关闭
+            conn.close()
+            
+    except json.JSONDecodeError as e:
+        logger.error(f"Tavily请求[{request_id}]解析JSON失败: {str(e)}")
         return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f'Tavily API 错误: {str(e)}')
+    except ssl.SSLError as e:
+        logger.error(f"Tavily请求[{request_id}]SSL错误: {str(e)}")
+        return None
+    except http.client.HTTPException as e:
+        logger.error(f"Tavily请求[{request_id}]HTTP错误: {str(e)}")
+        return None
+    except socket.timeout:
+        logger.error(f"Tavily请求[{request_id}]连接超时")
+        return None
+    except Exception as e:
+        error_trace = log_exception(e, f"Tavily请求[{request_id}]异常")
         return None
 
 def get_conversation_id():
@@ -644,12 +713,38 @@ def handle_message(data):
                 try:
                     logger.debug(f'[ID:{request_id}] 尝试执行Tavily搜索')
                     search_results = get_tavily_search_results(data['message'], tavily_api_key)
-                    if search_results:
-                        logger.debug(f'[ID:{request_id}] 搜索结果获取成功')
+                    if search_results and 'answer' in search_results:
+                        logger.debug(f'[ID:{request_id}] 搜索结果获取成功，长度: {len(search_results["answer"])}字符')
+                        # 发送搜索成功通知给客户端
+                        socketio.emit('search_status', {
+                            'status': 'success',
+                            'message': '已获取网络搜索结果',
+                            'request_id': request_id
+                        }, room=request.sid)
                     else:
-                        logger.warning(f'[ID:{request_id}] 搜索结果为空')
+                        logger.warning(f'[ID:{request_id}] 搜索结果为空或缺少answer字段')
+                        # 发送搜索警告通知给客户端
+                        socketio.emit('search_status', {
+                            'status': 'warning',
+                            'message': '网络搜索未返回结果，将使用模型直接回答',
+                            'request_id': request_id
+                        }, room=request.sid)
                 except Exception as e:
                     error_trace = log_exception(e, f'[ID:{request_id}] Tavily搜索失败')
+                    # 发送搜索错误通知给客户端
+                    socketio.emit('search_status', {
+                        'status': 'error',
+                        'message': '网络搜索失败，将使用模型直接回答',
+                        'request_id': request_id
+                    }, room=request.sid)
+            else:
+                logger.warning(f'[ID:{request_id}] Tavily搜索已启用但未设置API密钥')
+                # 发送搜索配置错误通知
+                socketio.emit('search_status', {
+                    'status': 'error',
+                    'message': '请先设置您的Tavily API密钥',
+                    'request_id': request_id
+                }, room=request.sid)
 
         # 构建系统消息
         system_message = 'You are a helpful assistant.'
