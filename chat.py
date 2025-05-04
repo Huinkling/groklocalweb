@@ -45,8 +45,6 @@ class SessionManager:
     def __init__(self, max_conversations=50, max_messages_per_conversation=30):
         self.conversation_history = {}
         self.user_api_keys = {}
-        self.user_tavily_settings = {}
-        self.user_tavily_api_keys = {}
         self.max_conversations = max_conversations
         self.max_messages_per_conversation = max_messages_per_conversation
     
@@ -142,12 +140,10 @@ class SessionManager:
         except Exception as e:
             logger.error(f"清理过期数据时发生错误: {str(e)}")
 
-# 初始化会话管理器，减小默认值以适应云环境
+# 初始化会话管理器
 session_manager = SessionManager(max_conversations=50, max_messages_per_conversation=30)
 conversation_history = session_manager.conversation_history
 user_api_keys = session_manager.user_api_keys
-user_tavily_settings = session_manager.user_tavily_settings
-user_tavily_api_keys = session_manager.user_tavily_api_keys
 
 # 添加定期清理任务
 def cleanup_task():
@@ -405,12 +401,6 @@ def handle_message(data):
 
         # 更新API密钥
         user_api_keys[request.sid] = api_key
-        
-        # 处理Tavily设置
-        if 'tavily_enabled' in data:
-            user_tavily_settings[request.sid] = data.get('tavily_enabled')
-        if 'tavily_api_key' in data and data.get('tavily_api_key'):
-            user_tavily_api_keys[request.sid] = data.get('tavily_api_key')
 
         # 消息长度检查
         if len(data.get('message', '')) > 4000:
@@ -447,28 +437,8 @@ def handle_message(data):
             'request_id': request_id
         }, room=request.sid)
 
-        # 处理Tavily搜索
-        search_results = None
-        if user_tavily_settings.get(request.sid, False):
-            tavily_api_key = user_tavily_api_keys.get(request.sid)
-            if tavily_api_key:
-                try:
-                    search_results = get_tavily_search_results(data['message'], tavily_api_key)
-                except Exception as e:
-                    logger.error(f'[ID:{request_id}] Tavily搜索失败: {str(e)}')
-
-        # 构建系统消息
-        system_message = 'You are a helpful assistant.'
-        if search_results and 'answer' in search_results:
-            system_message = f"""You are a helpful assistant. I will provide you with some search results as background information.
-
-Search Results:
-{search_results['answer']}
-
-Please answer the user's question based on the search results above. If the search results are relevant, prioritize using information from them. If the search results are not relevant, you can ignore them and answer directly. Please ensure your response is accurate, relevant, and helpful."""
-
         # 构建API请求消息列表
-        messages = [{'role': 'system', 'content': system_message}]
+        messages = [{'role': 'system', 'content': 'You are a helpful assistant.'}]
         messages.extend(current_messages)
         messages.append(user_message)
 
