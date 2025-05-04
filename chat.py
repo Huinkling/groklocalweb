@@ -10,6 +10,10 @@ import time
 import ssl
 from datetime import datetime
 from dotenv import load_dotenv
+import urllib.request
+import urllib.error
+import http.client
+import socket
 
 # 加载环境变量
 load_dotenv()
@@ -290,7 +294,7 @@ def calculate_tokens(messages):
     return total_tokens
 
 def send_message(messages, api_key=None):
-    """向API发送消息并获取响应"""
+    """向API发送消息并获取响应，使用urllib不依赖requests库"""
     if not api_key:
         logger.error("未设置API密钥")
         return {'error': '请先在设置中配置有效的API密钥'}
@@ -311,12 +315,6 @@ def send_message(messages, api_key=None):
         logger.debug(f"API请求[{request_id}]初始化: 消息数={len(messages)}")
         logger.debug(f"API请求[{request_id}]URL: {API_URL}")
         
-        # 构建请求头
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {api_key}'
-        }
-        
         # 从环境变量获取模型信息
         model = os.getenv('MODEL_NAME', 'grok-3-beta')
         temperature = float(os.getenv('TEMPERATURE', '0'))
@@ -331,18 +329,27 @@ def send_message(messages, api_key=None):
         }
         
         # 记录请求数据大小
-        request_size = len(json.dumps(data))
+        data_json = json.dumps(data)
+        request_size = len(data_json)
         logger.debug(f"API请求[{request_id}]数据大小: {request_size}字节")
         
         start_time = datetime.now()
         
+        # 构建请求头
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}',
+            'User-Agent': 'Grok-API-Client/1.0'
+        }
+        
+        # 使用底层urllib库而不是requests
+        import urllib.request
+        import urllib.error
+        import http.client
+        
         # 重试配置
         max_retries = 3
         base_delay = 2
-        
-        # 创建自定义会话，避免SSL验证问题
-        session = requests.Session()
-        session.verify = False  # 禁用SSL验证
         
         # 执行请求
         for attempt in range(max_retries):
@@ -350,83 +357,93 @@ def send_message(messages, api_key=None):
                 current_delay = base_delay * (2 ** attempt)
                 logger.debug(f"API请求[{request_id}]尝试: {attempt + 1}/{max_retries}")
                 
-                # 发送请求，使用会话对象
-                response = session.post(
-                    API_URL,
-                    headers=headers,
-                    json=data,
-                    timeout=60
-                )
+                # 创建请求上下文
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
                 
-                # 记录响应基本信息
-                elapsed_time = response.elapsed.total_seconds()
-                logger.debug(f"API请求[{request_id}]响应时间: {elapsed_time}秒")
-                logger.debug(f"API请求[{request_id}]状态码: {response.status_code}")
+                # 解析URL
+                if API_URL.startswith('https://'):
+                    logger.debug(f"API请求[{request_id}]使用HTTPS连接")
+                    host = API_URL.replace('https://', '').split('/')[0]
+                    path = '/' + '/'.join(API_URL.replace('https://', '').split('/')[1:])
+                    conn = http.client.HTTPSConnection(host, context=ctx, timeout=60)
+                else:
+                    logger.debug(f"API请求[{request_id}]使用HTTP连接")
+                    host = API_URL.replace('http://', '').split('/')[0]
+                    path = '/' + '/'.join(API_URL.replace('http://', '').split('/')[1:])
+                    conn = http.client.HTTPConnection(host, timeout=60)
+                
+                # 发送请求
+                conn.request("POST", path, data_json, headers)
+                
+                # 获取响应
+                start_response_time = datetime.now()
+                response = conn.getresponse()
+                response_status = response.status
+                elapsed_time = (datetime.now() - start_response_time).total_seconds()
+                
+                logger.debug(f"API请求[{request_id}]响应状态码: {response_status}, 用时: {elapsed_time}秒")
                 
                 # 处理错误状态码
-                if response.status_code != 200:
-                    logger.warning(f"API请求[{request_id}]返回非200状态码: {response.status_code}")
-                    # 记录响应头信息，可能包含错误提示
-                    logger.debug(f"API请求[{request_id}]响应头: {dict(response.headers)}")
+                if response_status != 200:
+                    response_body = response.read().decode('utf-8')
+                    logger.warning(f"API请求[{request_id}]返回非200状态码: {response_status}")
+                    logger.debug(f"API请求[{request_id}]响应头: {dict(response.getheaders())}")
+                    logger.debug(f"API请求[{request_id}]响应内容: {response_body[:200]}")
+                    
+                    if response_status == 401:
+                        return {'error': 'API密钥无效或已过期，请更新您的API密钥'}
+                    elif response_status == 429:
+                        if attempt < max_retries - 1:
+                            retry_after = int(dict(response.getheaders()).get('Retry-After', current_delay))
+                            logger.warning(f"API请求[{request_id}]超限，等待 {retry_after} 秒后重试")
+                            time.sleep(retry_after)
+                            continue
+                        return {'error': 'API请求频率超限，请稍后再试'}
+                    elif response_status == 500:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"API请求[{request_id}]服务器错误，等待 {current_delay} 秒后重试")
+                            time.sleep(current_delay)
+                            continue
+                        return {'error': 'API服务器出现错误，请稍后再试'}
+                    elif response_status == 503:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"API请求[{request_id}]服务暂时不可用，等待 {current_delay} 秒后重试")
+                            time.sleep(current_delay)
+                            continue
+                        return {'error': 'API服务暂时不可用，请稍后再试'}
+                    else:
+                        return {'error': f'API响应错误: {response_status}'}
                 
-                if response.status_code == 401:
-                    return {'error': 'API密钥无效或已过期，请更新您的API密钥'}
-                elif response.status_code == 429:
-                    if attempt < max_retries - 1:
-                        retry_after = int(response.headers.get('Retry-After', current_delay))
-                        logger.warning(f"API请求[{request_id}]超限，等待 {retry_after} 秒后重试")
-                        time.sleep(retry_after)
-                        continue
-                    return {'error': 'API请求频率超限，请稍后再试'}
-                elif response.status_code == 500:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"API请求[{request_id}]服务器错误，等待 {current_delay} 秒后重试")
-                        time.sleep(current_delay)
-                        continue
-                    return {'error': 'API服务器出现错误，请稍后再试'}
-                elif response.status_code == 503:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"API请求[{request_id}]服务暂时不可用，等待 {current_delay} 秒后重试")
-                        time.sleep(current_delay)
-                        continue
-                    return {'error': 'API服务暂时不可用，请稍后再试'}
-                
-                # 确保响应状态码正常
-                try:
-                    response.raise_for_status()
-                except Exception as e:
-                    logger.error(f"API请求[{request_id}]状态码错误: {str(e)}")
-                    return {'error': f'API响应状态错误: {response.status_code}'}
+                # 读取响应内容
+                response_data = response.read().decode('utf-8')
                 
                 # 尝试获取并记录响应内容预览
-                try:
-                    response_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
-                    logger.debug(f"API请求[{request_id}]响应预览: {response_preview}")
-                except Exception:
-                    pass
+                response_preview = response_data[:200] + '...' if len(response_data) > 200 else response_data
+                logger.debug(f"API请求[{request_id}]响应预览: {response_preview}")
                 
                 # 解析响应JSON
                 try:
-                    response_data = response.json()
+                    response_json = json.loads(response_data)
                 except json.JSONDecodeError as e:
                     logger.error(f"API请求[{request_id}]解析JSON失败: {str(e)}")
-                    logger.debug(f"API请求[{request_id}]响应内容: {response.text[:500]}")
                     if attempt < max_retries - 1:
                         continue
                     return {'error': 'API响应格式错误，请稍后再试'}
                 
                 # 验证响应结构
-                if not isinstance(response_data, dict):
+                if not isinstance(response_json, dict):
                     logger.error(f"API请求[{request_id}]响应不是字典类型")
                     return {'error': 'API响应格式错误'}
                 
                 # 检查是否包含必要字段
-                if 'choices' not in response_data:
+                if 'choices' not in response_json:
                     logger.error(f"API请求[{request_id}]响应缺少choices字段")
-                    logger.debug(f"API请求[{request_id}]响应结构: {list(response_data.keys())}")
+                    logger.debug(f"API请求[{request_id}]响应结构: {list(response_json.keys())}")
                     return {'error': 'API响应数据不完整'}
                 
-                if not isinstance(response_data['choices'], list):
+                if not isinstance(response_json['choices'], list):
                     logger.error(f"API请求[{request_id}]响应choices不是列表类型")
                     return {'error': 'API响应数据格式错误'}
                 
@@ -437,34 +454,48 @@ def send_message(messages, api_key=None):
                 
                 logger.info(f"API请求[{request_id}]成功，总耗时: {response_time}秒")
                 
+                # 关闭连接
+                conn.close()
+                
                 # 返回成功响应
                 return {
-                    'response': response_data,
+                    'response': response_json,
                     'response_time': response_time,
                     'token_count': token_count
                 }
                 
-            except requests.exceptions.Timeout:
-                logger.error(f"API请求[{request_id}]超时 (尝试 {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    continue
-                return {'error': 'API请求超时，请检查网络连接后再试'}
-                
-            except requests.exceptions.ConnectionError:
-                logger.error(f"API请求[{request_id}]连接错误 (尝试 {attempt + 1}/{max_retries})")
+            except urllib.error.URLError as e:
+                logger.error(f"API请求[{request_id}]URL错误: {str(e)}")
                 if attempt < max_retries - 1:
                     time.sleep(current_delay)
                     continue
-                return {'error': 'API连接失败，请检查网络连接或API地址是否正确'}
-            
-            except requests.exceptions.SSLError as e:
-                logger.error(f"API请求[{request_id}]SSL错误: {str(e)}")
-                # 对于SSL错误，我们直接返回错误，不进行重试
-                return {'error': 'API连接SSL错误，请联系管理员检查服务器配置'}
+                return {'error': f'API连接错误: {str(e)}'}
                 
-            except requests.exceptions.RequestException as e:
+            except http.client.HTTPException as e:
+                logger.error(f"API请求[{request_id}]HTTP错误: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(current_delay)
+                    continue
+                return {'error': f'API请求错误: {str(e)}'}
+                
+            except socket.timeout:
+                logger.error(f"API请求[{request_id}]连接超时")
+                if attempt < max_retries - 1:
+                    time.sleep(current_delay)
+                    continue
+                return {'error': 'API请求超时，请检查网络连接后再试'}
+                
+            except Exception as e:
                 error_trace = log_exception(e, f"API请求[{request_id}]异常")
                 return {'error': f'API请求出现错误: {str(e)}'}
+                
+            finally:
+                # 确保连接被关闭
+                if 'conn' in locals():
+                    try:
+                        conn.close()
+                    except:
+                        pass
                 
     except RecursionError as e:
         # 特别处理递归错误
@@ -473,13 +504,6 @@ def send_message(messages, api_key=None):
     except Exception as e:
         error_trace = log_exception(e, "发送消息时发生未知错误")
         return {'error': '发生未知错误，请稍后再试'}
-    finally:
-        # 确保会话被关闭
-        if 'session' in locals():
-            try:
-                session.close()
-            except:
-                pass
 
 @app.route('/')
 def index():
