@@ -49,6 +49,8 @@ class SessionManager:
         self.user_tavily_api_keys = {}
         self.max_conversations = max_conversations
         self.max_messages_per_conversation = max_messages_per_conversation
+        self._recursion_depth = 0
+        self._max_recursion_depth = 10
     
     def cleanup_old_conversations(self):
         """清理旧会话以节省内存"""
@@ -65,30 +67,41 @@ class SessionManager:
     
     def add_message_to_conversation(self, conversation_id, message):
         """添加消息到会话，并在必要时清理旧消息"""
-        if conversation_id not in self.conversation_history:
-            self.conversation_history[conversation_id] = {
-                'messages': [],
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'title': message.get('content', '')[:30] + '...' if len(message.get('content', '')) > 30 else message.get('content', ''),
-                'status': 'active'
-            }
-        
-        # 添加新消息
-        self.conversation_history[conversation_id]['messages'].append(message)
-        
-        # 如果消息数量超过限制，删除最旧的消息
-        messages = self.conversation_history[conversation_id]['messages']
-        if len(messages) > self.max_messages_per_conversation:
-            # 保留系统消息和最新的消息
-            system_messages = [msg for msg in messages if msg['role'] == 'system']
-            other_messages = [msg for msg in messages if msg['role'] != 'system']
+        # 检查递归深度
+        self._recursion_depth += 1
+        if self._recursion_depth > self._max_recursion_depth:
+            logger.error(f"达到最大递归深度 {self._max_recursion_depth}")
+            self._recursion_depth = 0
+            raise RuntimeError("达到最大递归深度限制")
             
-            # 计算需要保留的非系统消息数量
-            keep_count = self.max_messages_per_conversation - len(system_messages)
-            kept_messages = system_messages + other_messages[-keep_count:]
+        try:
+            if conversation_id not in self.conversation_history:
+                self.conversation_history[conversation_id] = {
+                    'messages': [],
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'title': message.get('content', '')[:30] + '...' if len(message.get('content', '')) > 30 else message.get('content', ''),
+                    'status': 'active'
+                }
             
-            self.conversation_history[conversation_id]['messages'] = kept_messages
-            logger.info(f"会话 {conversation_id} 清理了 {len(messages) - len(kept_messages)} 条旧消息")
+            # 添加新消息
+            self.conversation_history[conversation_id]['messages'].append(message)
+            
+            # 如果消息数量超过限制，删除最旧的消息
+            messages = self.conversation_history[conversation_id]['messages']
+            if len(messages) > self.max_messages_per_conversation:
+                # 保留系统消息和最新的消息
+                system_messages = [msg for msg in messages if msg['role'] == 'system']
+                other_messages = [msg for msg in messages if msg['role'] != 'system']
+                
+                # 计算需要保留的非系统消息数量
+                keep_count = self.max_messages_per_conversation - len(system_messages)
+                kept_messages = system_messages + other_messages[-keep_count:]
+                
+                self.conversation_history[conversation_id]['messages'] = kept_messages
+                logger.info(f"会话 {conversation_id} 清理了 {len(messages) - len(kept_messages)} 条旧消息")
+        finally:
+            # 确保递归深度计数器被重置
+            self._recursion_depth -= 1
     
     def get_conversation_messages(self, conversation_id):
         """获取会话消息"""
