@@ -15,7 +15,7 @@
             --error-color: rgba(220, 38, 38, 0.9);
         }
         
-        /* Notification styles */
+        /* 通知样式 */
         .notification {
             position: fixed;
             top: 20px;
@@ -37,7 +37,7 @@
             background-color: var(--error-color);
         }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
             margin: 0;
             padding: 0;
             background-color: var(--bg-color);
@@ -63,7 +63,7 @@
             z-index: 200;
         }
         
-        /* Mobile sidebar control button */
+        /* 移动端侧边栏控制按钮 */
         #sidebar-toggle {
             display: none;
             position: fixed;
@@ -516,77 +516,80 @@
             color: #666;
             font-style: italic;
         }
-        /* Responsive layout styles */
-        @media (max-width: 767px) {
+        /* 响应式布局样式 */
+        @media (max-width: 768px) {
             #history-sidebar {
                 transform: translateX(-100%);
                 width: 80%;
                 max-width: 300px;
             }
             
-            #chat-container {
-                margin-left: 0;
-                padding: 10px;
-                width: 100%;
-            }
-            
-            #conversation {
-                padding-bottom: 140px;
-            }
-            
-            #chat-input {
-                position: fixed;
-                bottom: 0;
-                left: 0;
-                width: 100%;
-                padding: 10px;
-                background: rgba(0, 0, 0, 0.8);
-                backdrop-filter: blur(10px);
-                border-top: 1px solid var(--border-color);
-            }
-            
-            .chat-bubble {
-                max-width: 85%;
-            }
-            
             #sidebar-toggle {
-                display: block;
-            }
-
-            .btn-new {
-                font-size: 14px;
-                padding: 8px 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
             }
             
-            .btn-clear, .btn-search {
-                font-size: 12px;
-                padding: 6px 10px;
+            #main-content {
+                margin-left: 0;
+                width: 100%;
+            }
+            
+            #input-container {
+                width: 100%;
+                margin-left: 0;
+                padding: 15px;
+                box-sizing: border-box;
+            }
+            
+            #chat-container {
+                margin: 0;
+                padding: 15px 15px 80px;
+            }
+            
+            .message {
+                max-width: 80%;
+                font-size: 15px;
+                padding: 12px 15px;
+            }
+            
+            .title {
+                font-size: 32px;
+                top: 25%;
+                left: 50%;
             }
             
             .modal-content {
                 width: 90%;
                 max-width: 350px;
+                padding: 20px;
             }
-        }
-        
-        /* Sidebar visible styles */
-        body.sidebar-visible {
-            overflow: hidden;
-        }
-        
-        body.sidebar-visible #history-sidebar {
-            transform: translateX(0);
-        }
-        
-        body.sidebar-visible::after {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 100;
+            
+            #user-input {
+                height: 20px;
+                padding: 12px;
+            }
+            
+            button {
+                padding: 10px 15px;
+                font-size: 14px;
+            }
+            
+            /* 显示侧边栏时的样式 */
+            body.sidebar-visible #history-sidebar {
+                transform: translateX(0);
+            }
+            
+            body.sidebar-visible::after {
+                content: '';
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 150;
+            }
         }
     </style>
 </head>
@@ -614,7 +617,7 @@
         title.addEventListener('dragend', (e) => {
             isDragging = false;
             title.classList.remove('dragging');
-            // Animation bounce effect
+            // 回弹动画
             title.style.transform = 'translate(-50%, -50%)';
             title.style.left = 'calc(250px + (100% - 250px) / 2)';
             title.style.top = '30%';
@@ -675,27 +678,41 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script>
-        // Get current URL host part to ensure correct connection in deployment environment
-        const currentUrl = window.location.origin;
+        // 获取当前URL的主机部分，确保在部署环境中正确连接
+        const host = window.location.hostname;
+        const port = window.location.port;
+        const protocol = window.location.protocol;
         
-        // Dynamically build WebSocket connection URL
-        const socketUrl = currentUrl;
-        console.log('Connecting to WebSocket server:', socketUrl);
+        // 动态构建WebSocket连接URL
+        const socketUrl = port ? `${protocol}//${host}:${port}` : `${protocol}//${host}`;
+        console.log('连接到WebSocket服务器:', socketUrl);
         
-        // Initialize Socket.IO connection
         const socket = io(socketUrl, {
-            path: '/socket.io'
+            transports: ['websocket', 'polling'],
+            reconnectionAttempts: 10,
+            reconnectionDelay: 1000,
+            timeout: 20000,
+            autoConnect: true
         });
         
-        // Add connection status logs
-        socket.on('connect', function() {
-            console.log('WebSocket connection successful, ID:', socket.id);
-            showNotification('Server connection successful', 'success');
+        // 添加连接状态日志
+        socket.on('connect', () => {
+            console.log('WebSocket连接成功，ID:', socket.id);
+            showNotification('服务器连接成功', 'success');
             
-            // Resend API key after successful connection
-            if(apiKey) {
-                console.log('Resending API key to server');
-                sendMessage('', true);
+            // 连接成功后重新发送API密钥
+            if (apiKey) {
+                console.log('重新发送API密钥到服务器');
+                socket.emit('update_settings', { api_key: apiKey });
+            }
+            
+            // 如果有未完成的请求，显示提示
+            if (pendingRequests.length > 0) {
+                showNotification('连接已恢复，但之前的请求可能已丢失，请重新发送', 'error');
+                thinking.style.display = 'none';
+                userInput.disabled = false;
+                document.querySelector('#input-container button').disabled = false;
+                pendingRequests = [];
             }
         });
         const chatContainer = document.getElementById('chat-container');
@@ -710,8 +727,8 @@
         let apiKey = localStorage.getItem('api_key');
         let tavilyApiKey = localStorage.getItem('tavily_api_key');
         let tavilyEnabled = localStorage.getItem('tavily_enabled') === 'true';
-        let pendingRequests = []; // Track pending requests
-        let socketReconnecting = false; // Track if Socket is reconnecting
+        let pendingRequests = []; // 跟踪待处理的请求
+        let socketReconnecting = false; // 跟踪Socket是否正在重连
 
 
         // Check if API key is set and valid
@@ -776,18 +793,17 @@
 
         // 配置WebSocket连接
         socket.on('connect_error', (error) => {
-            console.error('WebSocket connection error:', error);
-            showNotification('Server connection failed, retrying...', 'error');
-            // Delay reconnection to avoid continuous failures
-            socketReconnecting = true;
-            setTimeout(function() {
+            console.error('WebSocket连接错误:', error);
+            showNotification('服务器连接失败，正在重试...', 'error');
+            // 延迟重连以避免连续失败
+            setTimeout(() => {
                 socket.connect();
-            }, 3000);
+            }, 2000);
         });
 
         socket.on('disconnect', (reason) => {
-            console.log('WebSocket disconnected, reason:', reason);
-            showNotification('Server connection disconnected, reconnecting...', 'error');
+            console.log('WebSocket断开连接，原因:', reason);
+            showNotification('服务器连接断开，正在重新连接...', 'error');
             if (reason === 'io server disconnect') {
                 // 服务器主动断开连接，需要手动重连
                 socket.connect();
@@ -797,12 +813,12 @@
         
         // 添加重连尝试事件监听
         socket.on('reconnect_attempt', (attemptNumber) => {
-            console.log(`Attempting to reconnect (${attemptNumber}/${socket.io.opts.reconnectionAttempts})`);
+            console.log(`尝试重新连接 (${attemptNumber}/${socket.io.opts.reconnectionAttempts})`);
         });
         
         socket.on('reconnect', (attemptNumber) => {
-            console.log(`Reconnected successfully, attempt count: ${attemptNumber}`);
-            showNotification('Server reconnected successfully', 'success');
+            console.log(`重新连接成功，尝试次数: ${attemptNumber}`);
+            showNotification('服务器重新连接成功', 'success');
             // 重新发送API密钥
             if (apiKey) {
                 socket.emit('update_settings', { api_key: apiKey });
@@ -810,12 +826,12 @@
         });
         
         socket.on('reconnect_error', (error) => {
-            console.error('Reconnection failed:', error);
+            console.error('重新连接失败:', error);
         });
         
         socket.on('reconnect_failed', () => {
-            console.error('Reconnection failed, maximum attempts reached');
-            showNotification('Server connection failed, please refresh the page and try again', 'error');
+            console.error('重新连接失败，已达到最大尝试次数');
+            showNotification('服务器连接失败，请刷新页面重试', 'error');
         });
 
         // 打开设置弹窗
@@ -852,7 +868,7 @@
             // 显示加载状态
             const saveBtn = document.querySelector('.modal-btn.save');
             const originalText = saveBtn.textContent;
-            saveBtn.textContent = 'Validating...';
+            saveBtn.textContent = '正在验证...';
             saveBtn.disabled = true;
             
             try {
@@ -943,7 +959,7 @@
                 if (requestIndex !== -1) {
                     pendingRequests.splice(requestIndex, 1);
                     thinking.style.display = 'none';
-                    showNotification('Server response timeout, please check network connection or try again later', 'error');
+                    showNotification('服务器响应超时，请检查网络连接或稍后重试', 'error');
                     userInput.disabled = false;
                     document.querySelector('#input-container button').disabled = false;
                     
@@ -951,7 +967,7 @@
                     const message = document.createElement('div');
                     message.className = 'message assistant-message';
                     const content = document.createElement('div');
-                    content.textContent = `Error: Response timeout, please check network connection or try again later`;
+                    content.textContent = `错误: 响应超时，请检查网络连接或稍后重试`;
                     content.style.color = 'var(--error-color)';
                     message.appendChild(content);
                     chatContainer.appendChild(message);
@@ -960,11 +976,11 @@
             }, 60000);
             
             // 发送消息并记录日志
-            console.log('Sending message:', message, 'Request ID:', requestId);
+            console.log('发送消息:', message, '请求ID:', requestId);
             
             // 检查Socket连接状态
             if (!socket.connected) {
-                console.log('Socket not connected, attempting to reconnect...');
+                console.log('Socket未连接，尝试重新连接...');
                 socket.connect();
                 
                 // 添加连接超时
@@ -972,7 +988,7 @@
                     if (!socket.connected) {
                         clearTimeout(messageTimeout);
                         thinking.style.display = 'none';
-                        showNotification('Unable to connect to server, please check network connection and refresh the page', 'error');
+                        showNotification('无法连接到服务器，请检查网络连接后刷新页面', 'error');
                         userInput.disabled = false;
                         document.querySelector('#input-container button').disabled = false;
                     }
@@ -1011,14 +1027,14 @@
                     }
                     
                     thinking.style.display = 'none';
-                    showNotification(acknowledgement.message || 'Message sending failed', 'error');
-                    console.error('Message sending failed:', acknowledgement);
+                    showNotification(acknowledgement.message || '消息发送失败', 'error');
+                    console.error('消息发送失败:', acknowledgement);
                     
                     // 重新启用输入控件
                     userInput.disabled = false;
                     document.querySelector('#input-container button').disabled = false;
                 } else {
-                    console.log('Message sent to server successfully, Request ID:', requestId);
+                    console.log('消息已成功发送到服务器，请求ID:', requestId);
                 }
             });
         }
@@ -1059,11 +1075,11 @@
             }
         });
 
-        // Request conversation history
+        // 获取历史记录
         socket.emit('get_history');
 
         socket.on('response', (data) => {
-            console.log('Received response:', data);
+            console.log('收到响应:', data);
             thinking.style.display = 'none';
             
             // 重新启用输入控件
@@ -1075,14 +1091,14 @@
                 const requestIndex = pendingRequests.indexOf(data.request_id);
                 if (requestIndex !== -1) {
                     pendingRequests.splice(requestIndex, 1);
-                    console.log('Request completed:', data.request_id);
+                    console.log('请求已完成:', data.request_id);
                 }
             }
             
             // 检查响应是否包含错误
             if (data.error) {
-                showNotification(data.error || 'Error occurred while getting response', 'error');
-                console.error('API response error:', data.error);
+                showNotification(data.error || '获取响应时发生错误', 'error');
+                console.error('API响应错误:', data.error);
                 return;
             }
             
@@ -1090,7 +1106,7 @@
             const message = document.createElement('div');
             message.className = 'message assistant-message';
             const content = document.createElement('div');
-            content.textContent = data.message || 'No response content';
+            content.textContent = data.message || '无响应内容';
             message.appendChild(content);
             
             // 添加响应信息
@@ -1106,7 +1122,7 @@
             // 更新会话ID
             if (data.conversation_id) {
                 currentConversationId = data.conversation_id;
-                console.log('Current conversation ID:', currentConversationId);
+                console.log('当前会话ID:', currentConversationId);
             }
         });
 
@@ -1121,7 +1137,7 @@
         });
 
         socket.on('error', (data) => {
-            console.error('Socket error event:', data);
+            console.error('Socket错误事件:', data);
             thinking.style.display = 'none';
             
             // 重新启用输入控件
@@ -1133,7 +1149,7 @@
                 const requestIndex = pendingRequests.indexOf(data.request_id);
                 if (requestIndex !== -1) {
                     pendingRequests.splice(requestIndex, 1);
-                    console.log('Request error:', data.request_id);
+                    console.log('请求出错:', data.request_id);
                 }
             }
             
@@ -1146,7 +1162,7 @@
             } else if (data && data.error) {
                 errorMessage = data.error;
             } else {
-                errorMessage = 'Error occurred while getting response, please check network connection or API key';
+                errorMessage = '获取响应时发生错误，请检查网络连接或API密钥';
             }
             
             // 显示错误通知
@@ -1156,17 +1172,17 @@
             const message = document.createElement('div');
             message.className = 'message assistant-message';
             const content = document.createElement('div');
-            content.textContent = `Error: ${errorMessage}`;
+            content.textContent = `错误: ${errorMessage}`;
             content.style.color = 'var(--error-color)';
             message.appendChild(content);
             chatContainer.appendChild(message);
             chatContainer.scrollTop = chatContainer.scrollHeight;
             
             // 如果是连接相关错误，尝试重新连接
-            if (errorMessage.includes('connection') || errorMessage.includes('network')) {
+            if (errorMessage.includes('连接') || errorMessage.includes('网络')) {
                 if (!socketReconnecting) {
                     socketReconnecting = true;
-                    console.log('Attempting to reconnect Socket...');
+                    console.log('尝试重新连接Socket...');
                     setTimeout(() => {
                         socket.connect();
                         socketReconnecting = false;
@@ -1178,7 +1194,7 @@
         // 监听API密钥更新事件
         socket.on('api_key_updated', (data) => {
             const saveBtn = document.querySelector('.modal-btn.save');
-            saveBtn.textContent = 'Save';
+            saveBtn.textContent = '保存';
             saveBtn.disabled = false;
             
             if (data.status === 'success') {
@@ -1198,7 +1214,7 @@
                 }, 3000);
             } else {
                 // 显示错误消息
-                alert(data.message || 'API key setting failed');
+                alert(data.message || 'API密钥设置失败');
             }
         });
 
@@ -1229,7 +1245,7 @@
         
         // 处理消息接收确认
         socket.on('message_received', (data) => {
-            console.log('Server has received message:', data);
+            console.log('服务器已接收消息:', data);
             // 添加UI反馈，显示服务器正在处理
             if (data.status === 'processing') {
                 thinking.style.display = 'block';
@@ -1237,7 +1253,7 @@
                 
                 // 记录请求ID，用于后续跟踪
                 if (data.request_id) {
-                    console.log('Server confirmed processing request:', data.request_id);
+                    console.log('服务器确认处理请求:', data.request_id);
                     // 确保请求ID在待处理列表中
                     if (pendingRequests.indexOf(data.request_id) === -1) {
                         pendingRequests.push(data.request_id);
@@ -1249,9 +1265,9 @@
         // 添加心跳检测，确保连接稳定
         setInterval(() => {
             if (socket.connected) {
-                console.log('WebSocket connection normal');
+                console.log('WebSocket连接正常');
             } else if (!socketReconnecting) {
-                console.log('WebSocket connection disconnected, attempting to reconnect...');
+                console.log('WebSocket连接已断开，尝试重新连接...');
                 socketReconnecting = true;
                 socket.connect();
                 setTimeout(() => {
