@@ -13,15 +13,25 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
-# 配置日志
+# 配置更详细的日志
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # 修改为DEBUG级别，获取更多信息
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
+
+# 添加详细错误追踪函数
+def log_exception(e, prefix="错误"):
+    """详细记录异常信息，包括堆栈跟踪"""
+    import traceback
+    error_trace = traceback.format_exc()
+    logger.error(f"{prefix}: {str(e)}")
+    logger.error(f"错误类型: {type(e).__name__}")
+    logger.error(f"错误堆栈:\n{error_trace}")
+    return error_trace
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key')
@@ -45,8 +55,51 @@ class SessionManager:
     def __init__(self, max_conversations=50, max_messages_per_conversation=30):
         self.conversation_history = {}
         self.user_api_keys = {}
+        self.user_tavily_settings = {}
+        self.user_tavily_api_keys = {}
         self.max_conversations = max_conversations
         self.max_messages_per_conversation = max_messages_per_conversation
+    
+    def sanitize_message(self, message):
+        """清理消息数据，确保格式正确且不包含无效数据"""
+        try:
+            if not isinstance(message, dict):
+                logger.warning(f"消息格式不正确: {type(message)}")
+                return None
+            
+            # 确保基本字段存在
+            if 'role' not in message or 'content' not in message:
+                logger.warning("消息缺少必要字段")
+                return None
+            
+            # 清理并验证角色字段
+            role = str(message.get('role', '')).strip().lower()
+            if role not in ['system', 'user', 'assistant']:
+                logger.warning(f"消息角色无效: {role}")
+                role = 'user'  # 默认为用户消息
+            
+            # 清理内容字段
+            content = str(message.get('content', '')).strip()
+            if not content:
+                logger.warning("消息内容为空")
+                return None
+            
+            # 限制内容长度
+            if len(content) > 10000:
+                logger.warning(f"消息内容过长 ({len(content)}字符)，已截断")
+                content = content[:10000] + "..."
+            
+            # 创建干净的消息对象
+            clean_message = {
+                'role': role,
+                'content': content,
+                'timestamp': message.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            }
+            
+            return clean_message
+        except Exception as e:
+            logger.error(f"清理消息时出错: {str(e)}")
+            return None
     
     def cleanup_old_conversations(self):
         """清理旧会话以节省内存"""
@@ -67,12 +120,18 @@ class SessionManager:
     def add_message_to_conversation(self, conversation_id, message):
         """添加消息到会话，并在必要时清理旧消息"""
         try:
+            # 清理消息数据
+            clean_message = self.sanitize_message(message)
+            if not clean_message:
+                logger.warning(f"跳过添加无效消息到会话: {conversation_id}")
+                return
+            
             # 如果会话不存在，创建新会话
             if conversation_id not in self.conversation_history:
                 self.conversation_history[conversation_id] = {
                     'messages': [],
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'title': message.get('content', '')[:30] + '...' if len(message.get('content', '')) > 30 else message.get('content', '')
+                    'title': clean_message.get('content', '')[:30] + '...' if len(clean_message.get('content', '')) > 30 else clean_message.get('content', '')
                 }
             
             conv = self.conversation_history[conversation_id]
@@ -91,24 +150,28 @@ class SessionManager:
                 
                 # 直接替换消息列表
                 conv['messages'] = kept_messages
+                logger.debug(f"会话 {conversation_id} 清理后的消息数: {len(kept_messages)}")
             
             # 添加新消息
-            conv['messages'].append(message)
+            conv['messages'].append(clean_message)
             # 更新时间戳
             conv['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            logger.debug(f"消息已添加到会话 {conversation_id}, 当前消息数: {len(conv['messages'])}")
             
             # 定期清理旧会话
             if len(self.conversation_history) > self.max_conversations:
                 self.cleanup_old_conversations()
                 
         except Exception as e:
-            logger.error(f"添加消息到会话时发生错误: {str(e)}")
-            raise
+            error_trace = log_exception(e, f"添加消息到会话 {conversation_id} 时发生错误")
+            raise RuntimeError(f"添加消息到会话失败: {str(e)}")
     
     def get_conversation_messages(self, conversation_id):
         """获取会话消息"""
         try:
-            return self.conversation_history.get(conversation_id, {}).get('messages', [])
+            messages = self.conversation_history.get(conversation_id, {}).get('messages', [])
+            # 复制消息列表，避免引用问题
+            return list(messages)
         except Exception as e:
             logger.error(f"获取会话消息时发生错误: {str(e)}")
             return []
@@ -140,10 +203,12 @@ class SessionManager:
         except Exception as e:
             logger.error(f"清理过期数据时发生错误: {str(e)}")
 
-# 初始化会话管理器
+# 初始化会话管理器，减小默认值以适应云环境
 session_manager = SessionManager(max_conversations=50, max_messages_per_conversation=30)
 conversation_history = session_manager.conversation_history
 user_api_keys = session_manager.user_api_keys
+user_tavily_settings = session_manager.user_tavily_settings
+user_tavily_api_keys = session_manager.user_tavily_api_keys
 
 # 添加定期清理任务
 def cleanup_task():
@@ -191,6 +256,7 @@ def calculate_tokens(messages):
     return total_tokens
 
 def send_message(messages, api_key=None):
+    """向API发送消息并获取响应"""
     if not api_key:
         logger.error("未设置API密钥")
         return {'error': '请先在设置中配置有效的API密钥'}
@@ -206,14 +272,21 @@ def send_message(messages, api_key=None):
                 logger.error("消息格式错误：缺少必要字段")
                 return {'error': '消息格式错误'}
         
+        # 记录请求详情
+        request_id = datetime.now().strftime('%Y%m%d%H%M%S')
+        logger.debug(f"API请求[{request_id}]初始化: 消息数={len(messages)}")
+        logger.debug(f"API请求[{request_id}]URL: {API_URL}")
+        
+        # 构建请求头
         headers = {
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {api_key}'
         }
         
-        # 从环境变量获取模型名称和温度设置
+        # 从环境变量获取模型信息
         model = os.getenv('MODEL_NAME', 'grok-3-beta')
         temperature = float(os.getenv('TEMPERATURE', '0'))
+        logger.debug(f"API请求[{request_id}]模型: {model}, 温度: {temperature}")
         
         # 构建请求数据
         data = {
@@ -223,46 +296,59 @@ def send_message(messages, api_key=None):
             'temperature': temperature
         }
         
+        # 记录请求数据大小
+        request_size = len(json.dumps(data))
+        logger.debug(f"API请求[{request_id}]数据大小: {request_size}字节")
+        
         start_time = datetime.now()
         
-        # 添加超时设置和重试机制
+        # 重试配置
         max_retries = 3
-        base_delay = 2  # 基础延迟时间（秒）
+        base_delay = 2
         
+        # 执行请求
         for attempt in range(max_retries):
             try:
-                current_delay = base_delay * (2 ** attempt)  # 指数退避
+                current_delay = base_delay * (2 ** attempt)
+                logger.debug(f"API请求[{request_id}]尝试: {attempt + 1}/{max_retries}")
                 
                 # 发送请求
                 response = requests.post(
                     API_URL,
                     headers=headers,
                     json=data,
-                    timeout=60  # 60秒超时
+                    timeout=60
                 )
                 
-                # 记录响应状态
-                logger.info(f"API响应状态码: {response.status_code}")
+                # 记录响应基本信息
+                elapsed_time = response.elapsed.total_seconds()
+                logger.debug(f"API请求[{request_id}]响应时间: {elapsed_time}秒")
+                logger.debug(f"API请求[{request_id}]状态码: {response.status_code}")
                 
-                # 处理常见错误状态码
+                # 处理错误状态码
+                if response.status_code != 200:
+                    logger.warning(f"API请求[{request_id}]返回非200状态码: {response.status_code}")
+                    # 记录响应头信息，可能包含错误提示
+                    logger.debug(f"API请求[{request_id}]响应头: {dict(response.headers)}")
+                
                 if response.status_code == 401:
                     return {'error': 'API密钥无效或已过期，请更新您的API密钥'}
                 elif response.status_code == 429:
                     if attempt < max_retries - 1:
                         retry_after = int(response.headers.get('Retry-After', current_delay))
-                        logger.warning(f"API请求超限，等待 {retry_after} 秒后重试")
+                        logger.warning(f"API请求[{request_id}]超限，等待 {retry_after} 秒后重试")
                         time.sleep(retry_after)
                         continue
                     return {'error': 'API请求频率超限，请稍后再试'}
                 elif response.status_code == 500:
                     if attempt < max_retries - 1:
-                        logger.warning(f"API服务器错误，等待 {current_delay} 秒后重试")
+                        logger.warning(f"API请求[{request_id}]服务器错误，等待 {current_delay} 秒后重试")
                         time.sleep(current_delay)
                         continue
                     return {'error': 'API服务器出现错误，请稍后再试'}
                 elif response.status_code == 503:
                     if attempt < max_retries - 1:
-                        logger.warning(f"API服务暂时不可用，等待 {current_delay} 秒后重试")
+                        logger.warning(f"API请求[{request_id}]服务暂时不可用，等待 {current_delay} 秒后重试")
                         time.sleep(current_delay)
                         continue
                     return {'error': 'API服务暂时不可用，请稍后再试'}
@@ -270,34 +356,46 @@ def send_message(messages, api_key=None):
                 # 确保响应状态码正常
                 response.raise_for_status()
                 
-                # 解析响应数据
+                # 尝试获取并记录响应内容预览
+                try:
+                    response_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
+                    logger.debug(f"API请求[{request_id}]响应预览: {response_preview}")
+                except Exception:
+                    pass
+                
+                # 解析响应JSON
                 try:
                     response_data = response.json()
                 except json.JSONDecodeError as e:
-                    logger.error(f"解析API响应JSON时出错: {str(e)}")
+                    logger.error(f"API请求[{request_id}]解析JSON失败: {str(e)}")
+                    logger.debug(f"API请求[{request_id}]响应内容: {response.text[:500]}")
                     if attempt < max_retries - 1:
                         continue
                     return {'error': 'API响应格式错误，请稍后再试'}
                 
-                # 验证响应数据结构
+                # 验证响应结构
                 if not isinstance(response_data, dict):
-                    logger.error("API响应格式错误：不是字典类型")
+                    logger.error(f"API请求[{request_id}]响应不是字典类型")
                     return {'error': 'API响应格式错误'}
                 
-                if 'choices' not in response_data or not response_data['choices']:
-                    logger.error("API响应缺少choices字段")
+                # 检查是否包含必要字段
+                if 'choices' not in response_data:
+                    logger.error(f"API请求[{request_id}]响应缺少choices字段")
+                    logger.debug(f"API请求[{request_id}]响应结构: {list(response_data.keys())}")
                     return {'error': 'API响应数据不完整'}
                 
                 if not isinstance(response_data['choices'], list):
-                    logger.error("API响应choices字段格式错误")
+                    logger.error(f"API请求[{request_id}]响应choices不是列表类型")
                     return {'error': 'API响应数据格式错误'}
                 
-                # 计算响应时间和token数量
+                # 计算总处理时间
                 end_time = datetime.now()
                 response_time = (end_time - start_time).total_seconds()
                 token_count = calculate_tokens(messages)
                 
-                # 构建成功响应
+                logger.info(f"API请求[{request_id}]成功，总耗时: {response_time}秒")
+                
+                # 返回成功响应
                 return {
                     'response': response_data,
                     'response_time': response_time,
@@ -305,26 +403,24 @@ def send_message(messages, api_key=None):
                 }
                 
             except requests.exceptions.Timeout:
-                logger.error(f"API请求超时 (尝试 {attempt + 1}/{max_retries})")
+                logger.error(f"API请求[{request_id}]超时 (尝试 {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     continue
                 return {'error': 'API请求超时，请检查网络连接后再试'}
                 
             except requests.exceptions.ConnectionError:
-                logger.error(f"API连接错误 (尝试 {attempt + 1}/{max_retries})")
+                logger.error(f"API请求[{request_id}]连接错误 (尝试 {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     time.sleep(current_delay)
                     continue
                 return {'error': 'API连接失败，请检查网络连接或API地址是否正确'}
                 
             except requests.exceptions.RequestException as e:
-                logger.error(f"API请求异常: {str(e)}")
+                error_trace = log_exception(e, f"API请求[{request_id}]异常")
                 return {'error': f'API请求出现错误: {str(e)}'}
                 
     except Exception as e:
-        logger.error(f"发送消息时发生未知错误: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
+        error_trace = log_exception(e, "发送消息时发生未知错误")
         return {'error': '发生未知错误，请稍后再试'}
 
 @app.route('/')
@@ -391,16 +487,29 @@ def handle_message(data):
             socketio.emit('error', {'message': '消息内容不能为空'}, room=request.sid)
             return
 
+        # 检查会话ID
         conversation_id = get_conversation_id()
-        api_key = data.get('api_key') or user_api_keys.get(request.sid)
+        logger.debug(f'[ID:{request_id}] 会话ID: {conversation_id}')
         
+        # 检查API密钥
+        api_key = data.get('api_key') or user_api_keys.get(request.sid)
         if not api_key:
             logger.error(f'[ID:{request_id}] API密钥未设置')
             socketio.emit('error', {'message': '请先设置您的API密钥'}, room=request.sid)
             return
 
+        # 记录关键请求信息
+        logger.debug(f'[ID:{request_id}] API URL: {API_URL}')
+        logger.debug(f'[ID:{request_id}] 消息长度: {len(data.get("message", ""))}字符')
+        
         # 更新API密钥
         user_api_keys[request.sid] = api_key
+        
+        # 处理Tavily设置
+        if 'tavily_enabled' in data:
+            user_tavily_settings[request.sid] = data.get('tavily_enabled')
+        if 'tavily_api_key' in data and data.get('tavily_api_key'):
+            user_tavily_api_keys[request.sid] = data.get('tavily_api_key')
 
         # 消息长度检查
         if len(data.get('message', '')) > 4000:
@@ -418,17 +527,25 @@ def handle_message(data):
         # 获取当前会话消息
         current_messages = []
         try:
+            logger.debug(f'[ID:{request_id}] 尝试获取会话消息')
             current_messages = list(session_manager.get_conversation_messages(conversation_id))
+            logger.debug(f'[ID:{request_id}] 当前会话消息数: {len(current_messages)}')
         except Exception as e:
-            logger.error(f'[ID:{request_id}] 获取会话消息失败: {str(e)}')
+            error_trace = log_exception(e, f'[ID:{request_id}] 获取会话消息失败')
             # 继续处理，使用空列表
+            current_messages = []
 
         # 添加用户消息
         try:
+            logger.debug(f'[ID:{request_id}] 尝试添加用户消息到会话')
             session_manager.add_message_to_conversation(conversation_id, user_message)
+            logger.debug(f'[ID:{request_id}] 用户消息已添加到会话')
         except Exception as e:
-            logger.error(f'[ID:{request_id}] 添加用户消息失败: {str(e)}')
-            socketio.emit('error', {'message': '处理消息时发生错误，请重试'}, room=request.sid)
+            error_trace = log_exception(e, f'[ID:{request_id}] 添加用户消息失败')
+            socketio.emit('error', {
+                'message': '处理消息时发生错误，请重试', 
+                'request_id': request_id
+            }, room=request.sid)
             return
 
         # 发送处理确认
@@ -437,37 +554,104 @@ def handle_message(data):
             'request_id': request_id
         }, room=request.sid)
 
+        # 处理Tavily搜索
+        search_results = None
+        if user_tavily_settings.get(request.sid, False):
+            tavily_api_key = user_tavily_api_keys.get(request.sid)
+            if tavily_api_key:
+                try:
+                    logger.debug(f'[ID:{request_id}] 尝试执行Tavily搜索')
+                    search_results = get_tavily_search_results(data['message'], tavily_api_key)
+                    if search_results:
+                        logger.debug(f'[ID:{request_id}] 搜索结果获取成功')
+                    else:
+                        logger.warning(f'[ID:{request_id}] 搜索结果为空')
+                except Exception as e:
+                    error_trace = log_exception(e, f'[ID:{request_id}] Tavily搜索失败')
+
+        # 构建系统消息
+        system_message = 'You are a helpful assistant.'
+        if search_results and 'answer' in search_results:
+            logger.debug(f'[ID:{request_id}] 使用搜索结果构建系统消息')
+            system_message = f"""You are a helpful assistant. I will provide you with some search results as background information.
+
+Search Results:
+{search_results['answer']}
+
+Please answer the user's question based on the search results above. If the search results are relevant, prioritize using information from them. If the search results are not relevant, you can ignore them and answer directly. Please ensure your response is accurate, relevant, and helpful."""
+
         # 构建API请求消息列表
-        messages = [{'role': 'system', 'content': 'You are a helpful assistant.'}]
+        messages = [{'role': 'system', 'content': system_message}]
         messages.extend(current_messages)
         messages.append(user_message)
+        logger.debug(f'[ID:{request_id}] 准备发送API请求，总消息数: {len(messages)}')
 
         # 调用API
         try:
+            logger.debug(f'[ID:{request_id}] 开始调用API')
             response_data = send_message(messages, api_key)
+            logger.debug(f'[ID:{request_id}] API调用完成，检查响应')
         except Exception as e:
-            logger.error(f'[ID:{request_id}] API调用失败: {str(e)}')
-            socketio.emit('error', {'message': 'API调用失败，请稍后重试'}, room=request.sid)
+            error_trace = log_exception(e, f'[ID:{request_id}] API调用失败')
+            socketio.emit('error', {
+                'message': 'API调用失败，请稍后重试',
+                'request_id': request_id
+            }, room=request.sid)
             return
 
+        # 检查错误响应
         if 'error' in response_data:
+            logger.error(f'[ID:{request_id}] API返回错误: {response_data["error"]}')
             socketio.emit('error', {
                 'message': response_data['error'],
                 'request_id': request_id
             }, room=request.sid)
             return
 
-        # 处理API响应
+        # 验证响应格式
         if not (response_data and 'response' in response_data and 'choices' in response_data['response']):
+            logger.error(f'[ID:{request_id}] API响应格式不符合预期: {json.dumps(response_data)}')
             socketio.emit('error', {
                 'message': 'API响应格式错误',
                 'request_id': request_id
             }, room=request.sid)
             return
 
+        # 处理API响应
         try:
             # 提取助手回复
-            assistant_message = response_data['response']['choices'][0]['message']['content']
+            choices = response_data['response']['choices']
+            if not choices or not isinstance(choices, list) or len(choices) == 0:
+                logger.error(f'[ID:{request_id}] API响应choices为空或格式错误')
+                socketio.emit('error', {
+                    'message': 'API响应数据不完整',
+                    'request_id': request_id
+                }, room=request.sid)
+                return
+
+            # 检查消息格式
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict) or 'message' not in first_choice:
+                logger.error(f'[ID:{request_id}] API响应choice格式错误: {json.dumps(first_choice)}')
+                socketio.emit('error', {
+                    'message': 'API响应数据格式错误',
+                    'request_id': request_id
+                }, room=request.sid)
+                return
+
+            # 提取消息内容
+            message_obj = first_choice['message']
+            if not isinstance(message_obj, dict) or 'content' not in message_obj:
+                logger.error(f'[ID:{request_id}] API响应message格式错误: {json.dumps(message_obj)}')
+                socketio.emit('error', {
+                    'message': 'API响应消息格式错误',
+                    'request_id': request_id
+                }, room=request.sid)
+                return
+
+            # 获取内容
+            assistant_message = message_obj['content']
+            logger.debug(f'[ID:{request_id}] 成功提取助手回复，长度: {len(assistant_message)}字符')
             
             # 构建助手消息对象
             assistant_message_obj = {
@@ -477,9 +661,16 @@ def handle_message(data):
             }
 
             # 添加助手消息到会话
-            session_manager.add_message_to_conversation(conversation_id, assistant_message_obj)
+            try:
+                logger.debug(f'[ID:{request_id}] 尝试添加助手回复到会话')
+                session_manager.add_message_to_conversation(conversation_id, assistant_message_obj)
+                logger.debug(f'[ID:{request_id}] 助手回复已添加到会话')
+            except Exception as e:
+                error_trace = log_exception(e, f'[ID:{request_id}] 添加助手回复到会话失败')
+                # 即使添加失败，也尝试返回响应给用户
 
             # 发送响应给客户端
+            logger.debug(f'[ID:{request_id}] 发送响应给客户端')
             socketio.emit('response', {
                 'message': assistant_message,
                 'conversation_id': conversation_id,
@@ -489,17 +680,23 @@ def handle_message(data):
             }, room=request.sid)
 
             # 更新会话列表
-            conversations = [
-                {
-                    'id': cid,
-                    'title': conv['title'],
-                    'timestamp': conv['timestamp']
-                } for cid, conv in session_manager.conversation_history.items()
-            ]
-            socketio.emit('update_history', {'conversations': conversations}, room=request.sid)
+            try:
+                logger.debug(f'[ID:{request_id}] 更新会话列表')
+                conversations = [
+                    {
+                        'id': cid,
+                        'title': conv['title'],
+                        'timestamp': conv['timestamp']
+                    } for cid, conv in session_manager.conversation_history.items()
+                ]
+                socketio.emit('update_history', {'conversations': conversations}, room=request.sid)
+                logger.info(f'[ID:{request_id}] 消息处理完成')
+            except Exception as e:
+                error_trace = log_exception(e, f'[ID:{request_id}] 更新会话列表失败')
+                # 不阻止主要功能
 
         except Exception as e:
-            logger.error(f'[ID:{request_id}] 处理API响应失败: {str(e)}')
+            error_trace = log_exception(e, f'[ID:{request_id}] 处理API响应失败')
             socketio.emit('error', {
                 'message': '处理响应时发生错误，请重试',
                 'request_id': request_id
@@ -507,11 +704,9 @@ def handle_message(data):
             return
 
     except Exception as e:
-        logger.error(f'[ID:{request_id}] 处理消息时发生错误: {str(e)}')
-        import traceback
-        logger.error(traceback.format_exc())
+        error_trace = log_exception(e, f'[ID:{request_id}] 消息处理主流程出错')
         socketio.emit('error', {
-            'message': f'处理消息时发生错误: {str(e)}',
+            'message': f'发生未知错误，请稍后再试',
             'request_id': request_id
         }, room=request.sid)
 
