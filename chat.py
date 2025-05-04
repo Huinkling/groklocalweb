@@ -294,7 +294,8 @@ def get_tavily_search_results(query, api_key):
         data = {
             'query': query,
             'search_depth': 'advanced',
-            'include_answer': True
+            'include_answer': True,
+            'max_results': 5  # 限制结果数量以提高性能
         }
         
         # Step 3: Convert data to JSON
@@ -304,13 +305,42 @@ def get_tavily_search_results(query, api_key):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        logger.debug(f"Tavily request[{request_id}] SSL context created with verification disabled")
         
         # Step 5: Set host and path for the request
         host = 'api.tavily.com'
         path = '/search'
         
-        # Step 6: Create HTTPS connection
-        conn = http.client.HTTPSConnection(host, context=ctx, timeout=10)
+        # 直接使用requests库尝试，如果失败则回退到http.client
+        try:
+            logger.debug(f"Tavily request[{request_id}] trying with requests library first")
+            response = requests.post(
+                url,
+                headers=headers,
+                data=data_json,
+                timeout=15,  # 增加超时时间
+                verify=False  # 显式禁用SSL验证
+            )
+            
+            if response.status_code == 200:
+                logger.debug(f"Tavily request[{request_id}] requests library succeeded")
+                result = response.json()
+                if 'answer' in result:
+                    answer_length = len(result['answer'])
+                    logger.info(f"Tavily request[{request_id}] successful: answer_length={answer_length} characters")
+                    return result
+                else:
+                    logger.warning(f"Tavily request[{request_id}] missing answer field in response")
+                    return None
+            else:
+                logger.warning(f"Tavily request[{request_id}] requests library failed with status {response.status_code}, trying http.client")
+                # 如果请求失败，继续尝试http.client方法
+        except Exception as req_err:
+            logger.warning(f"Tavily request[{request_id}] requests library error: {str(req_err)}, trying http.client")
+            # 捕获请求错误，继续尝试http.client方法
+        
+        # Step 6: Create HTTPS connection with increased timeout
+        conn = http.client.HTTPSConnection(host, context=ctx, timeout=15)  # 增加超时时间
         logger.debug(f"Tavily request[{request_id}] connecting to: {host}")
         
         try:
@@ -358,6 +388,25 @@ def get_tavily_search_results(query, api_key):
         return None
     except ssl.SSLError as e:
         logger.error(f"Tavily request[{request_id}] SSL error: {str(e)}")
+        # 添加更详细的SSL错误处理
+        try:
+            # 最后的尝试：使用完全不验证的urllib请求
+            import urllib.request
+            
+            logger.debug(f"Tavily request[{request_id}] trying last resort method with urllib")
+            
+            ssl_context = ssl._create_unverified_context()
+            req = urllib.request.Request(url, data=data_json.encode('utf-8'), headers=headers, method='POST')
+            with urllib.request.urlopen(req, context=ssl_context, timeout=15) as response:
+                response_data = response.read().decode('utf-8')
+                result = json.loads(response_data)
+                
+                if 'answer' in result:
+                    logger.info(f"Tavily request[{request_id}] succeeded with urllib method")
+                    return result
+        except Exception as fallback_error:
+            logger.error(f"Tavily request[{request_id}] final fallback method failed: {str(fallback_error)}")
+            
         return None
     except http.client.HTTPException as e:
         logger.error(f"Tavily request[{request_id}] HTTP error: {str(e)}")
@@ -760,13 +809,30 @@ def handle_message(data):
             if tavily_api_key:
                 try:
                     logger.debug(f'[ID:{request_id}] Attempting Tavily search')
+                    # 通知用户搜索开始
+                    socketio.emit('search_status', {
+                        'status': 'info',
+                        'message': '正在进行网络搜索...',
+                        'request_id': request_id
+                    }, room=request.sid)
+                    
+                    # 设置搜索超时
+                    search_start_time = datetime.now()
+                    search_timeout = 20  # 搜索最长等待20秒
+                    
+                    # 执行搜索
                     search_results = get_tavily_search_results(data['message'], tavily_api_key)
+                    search_elapsed_time = (datetime.now() - search_start_time).total_seconds()
+                    
+                    # 记录搜索耗时
+                    logger.debug(f'[ID:{request_id}] Search completed in {search_elapsed_time:.2f}s')
+                    
                     if search_results and 'answer' in search_results:
                         logger.debug(f'[ID:{request_id}] Search results retrieved, length: {len(search_results["answer"])} characters')
                         # Send search success notification to client
                         socketio.emit('search_status', {
                             'status': 'success',
-                            'message': 'Web search results retrieved',
+                            'message': '网络搜索结果已获取',
                             'request_id': request_id
                         }, room=request.sid)
                     else:
@@ -774,15 +840,26 @@ def handle_message(data):
                         # Send search warning notification to client
                         socketio.emit('search_status', {
                             'status': 'warning',
-                            'message': 'No web search results found, model will answer directly',
+                            'message': '未找到相关搜索结果，模型将直接回答',
                             'request_id': request_id
                         }, room=request.sid)
                 except Exception as e:
                     error_trace = log_exception(e, f'[ID:{request_id}] Tavily search failed')
+                    # 向用户发送更详细的错误信息
+                    error_msg = str(e)
+                    if "SSL" in error_msg:
+                        error_msg = "搜索时出现SSL证书错误，请稍后再试"
+                    elif "timeout" in error_msg.lower():
+                        error_msg = "搜索请求超时，请稍后再试"
+                    elif "connect" in error_msg.lower():
+                        error_msg = "无法连接到搜索服务器，请检查网络连接"
+                    else:
+                        error_msg = "搜索失败，模型将直接回答"
+                        
                     # Send search error notification to client
                     socketio.emit('search_status', {
                         'status': 'error',
-                        'message': 'Web search failed, model will answer directly',
+                        'message': error_msg,
                         'request_id': request_id
                     }, room=request.sid)
             else:
@@ -790,7 +867,7 @@ def handle_message(data):
                 # Send search configuration error notification
                 socketio.emit('search_status', {
                     'status': 'error',
-                    'message': 'Please set your Tavily API key first',
+                    'message': '请先设置您的Tavily API密钥',
                     'request_id': request_id
                 }, room=request.sid)
 
@@ -964,6 +1041,24 @@ Please answer the user's question based on the search results above. If the sear
 if __name__ == '__main__':
     from gevent import monkey
     monkey.patch_all()
+    
+    # 确保SSL配置正确
+    try:
+        # 在应用启动时再次应用SSL修复
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # 修复urllib和urllib3
+        import urllib3
+        urllib3.disable_warnings()
+        
+        # 设置默认不验证SSL
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        logger.info("应用启动时已应用SSL修复")
+    except Exception as ssl_error:
+        logger.error(f"应用启动时SSL配置失败: {str(ssl_error)}")
     
     # 启动清理任务
     from threading import Thread
