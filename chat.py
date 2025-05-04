@@ -370,162 +370,153 @@ def handle_message(data):
     logger.info(f'开始处理消息请求 [ID:{request_id}]')
     
     try:
+        # 基本验证
+        if not data.get('message'):
+            logger.error(f'[ID:{request_id}] 消息内容为空')
+            socketio.emit('error', {'message': '消息内容不能为空'}, room=request.sid)
+            return
+
         conversation_id = get_conversation_id()
-        
-        # 从请求数据中获取API密钥，如果前端每次请求都发送API密钥，优先使用
         api_key = data.get('api_key') or user_api_keys.get(request.sid)
+        
         if not api_key:
             logger.error(f'[ID:{request_id}] API密钥未设置')
             socketio.emit('error', {'message': '请先设置您的API密钥'}, room=request.sid)
             return
-        
-        # 更新会话中的API密钥
+
+        # 更新API密钥
         user_api_keys[request.sid] = api_key
         
-        # 从请求数据中获取Tavily设置
+        # 处理Tavily设置
         if 'tavily_enabled' in data:
             user_tavily_settings[request.sid] = data.get('tavily_enabled')
         if 'tavily_api_key' in data and data.get('tavily_api_key'):
             user_tavily_api_keys[request.sid] = data.get('tavily_api_key')
-        
-        # 限制消息长度，防止过大的请求
+
+        # 消息长度检查
         if len(data.get('message', '')) > 4000:
             logger.warning(f'[ID:{request_id}] 消息过长: {len(data.get("message", ""))}字符')
             socketio.emit('error', {'message': '消息过长，请缩短您的消息'}, room=request.sid)
             return
-        
-        # 记录请求信息
-        logger.info(f'[ID:{request_id}] 收到消息请求: sid={request.sid}, conversation_id={conversation_id}')
-        
-        # 添加用户消息到历史记录
+
+        # 构建用户消息
         user_message = {
             'role': 'user',
             'content': data['message'],
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
-        
+
+        # 获取当前会话消息
+        current_messages = []
+        try:
+            current_messages = list(session_manager.get_conversation_messages(conversation_id))
+        except Exception as e:
+            logger.error(f'[ID:{request_id}] 获取会话消息失败: {str(e)}')
+            # 继续处理，使用空列表
+
+        # 添加用户消息
         try:
             session_manager.add_message_to_conversation(conversation_id, user_message)
-        except RuntimeError as e:
-            logger.error(f'[ID:{request_id}] 添加消息到会话时发生错误: {str(e)}')
+        except Exception as e:
+            logger.error(f'[ID:{request_id}] 添加用户消息失败: {str(e)}')
             socketio.emit('error', {'message': '处理消息时发生错误，请重试'}, room=request.sid)
             return
-        
-        # 发送确认消息给客户端
+
+        # 发送处理确认
         socketio.emit('message_received', {
             'status': 'processing',
             'request_id': request_id
         }, room=request.sid)
-        
-        # 如果启用了Tavily搜索，获取搜索结果
+
+        # 处理Tavily搜索
         search_results = None
         if user_tavily_settings.get(request.sid, False):
             tavily_api_key = user_tavily_api_keys.get(request.sid)
             if tavily_api_key:
-                logger.info(f'[ID:{request_id}] 使用Tavily搜索获取结果')
-                search_results = get_tavily_search_results(data['message'], tavily_api_key)
-                if search_results:
-                    logger.info(f'[ID:{request_id}] 成功获取Tavily搜索结果')
-                else:
-                    logger.warning(f'[ID:{request_id}] 获取Tavily搜索结果失败')
-            else:
-                logger.warning(f'[ID:{request_id}] Tavily搜索已启用但未设置API密钥')
-                socketio.emit('error', {'message': '请先设置您的Tavily API密钥'}, room=request.sid)
-        
-        # 构建系统提示，使用搜索结果作为主要内容
-        system_message = ''
+                try:
+                    search_results = get_tavily_search_results(data['message'], tavily_api_key)
+                except Exception as e:
+                    logger.error(f'[ID:{request_id}] Tavily搜索失败: {str(e)}')
+
+        # 构建系统消息
+        system_message = 'You are a helpful assistant.'
         if search_results and 'answer' in search_results:
-            search_answer = search_results['answer']
             system_message = f"""You are a helpful assistant. I will provide you with some search results as background information.
 
 Search Results:
-{search_answer}
+{search_results['answer']}
 
 Please answer the user's question based on the search results above. If the search results are relevant, prioritize using information from them. If the search results are not relevant, you can ignore them and answer directly. Please ensure your response is accurate, relevant, and helpful."""
-        else:
-            system_message = 'You are a helpful assistant.'
-        
-        # 记录系统提示信息长度
-        logger.info(f'[ID:{request_id}] 系统提示信息长度: {len(system_message)}字符')
-        
-        # 构建完整消息列表
-        current_messages = session_manager.get_conversation_messages(conversation_id)
-        messages = [
-            {
-                'role': 'system',
-                'content': system_message
-            }
-        ] + current_messages
-        
-        # 记录发送请求信息
-        logger.info(f'[ID:{request_id}] 发送API请求: conversation_id={conversation_id}, 消息数量={len(messages)}')
-        
-        # 调用API获取响应
-        response_data = send_message(messages, api_key)
-        
-        # 检查响应中是否包含错误
-        if 'error' in response_data:
-            error_message = response_data['error']
-            logger.error(f'[ID:{request_id}] API响应错误: {error_message}')
-            socketio.emit('error', {'message': error_message, 'request_id': request_id}, room=request.sid)
+
+        # 构建API请求消息列表
+        messages = [{'role': 'system', 'content': system_message}]
+        messages.extend(current_messages)
+        messages.append(user_message)
+
+        # 调用API
+        try:
+            response_data = send_message(messages, api_key)
+        except Exception as e:
+            logger.error(f'[ID:{request_id}] API调用失败: {str(e)}')
+            socketio.emit('error', {'message': 'API调用失败，请稍后重试'}, room=request.sid)
             return
-        
-        # 处理成功的响应
-        if response_data and 'response' in response_data and 'choices' in response_data['response']:
-            try:
-                assistant_message = response_data['response']['choices'][0]['message']['content']
-                logger.info(f'[ID:{request_id}] 收到API响应: 长度={len(assistant_message)}字符')
-                
-                # 添加助手回复到会话历史
-                assistant_message_obj = {
-                    'role': 'assistant',
-                    'content': assistant_message,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                
-                try:
-                    session_manager.add_message_to_conversation(conversation_id, assistant_message_obj)
-                except RuntimeError as e:
-                    logger.error(f'[ID:{request_id}] 添加助手回复到会话时发生错误: {str(e)}')
-                    socketio.emit('error', {'message': '处理响应时发生错误，请重试'}, room=request.sid)
-                    return
-                
-                # 发送响应给客户端
-                socketio.emit('response', {
-                    'message': assistant_message,
-                    'conversation_id': conversation_id,
-                    'response_time': round(response_data['response_time'], 2),
-                    'token_count': response_data['token_count'],
-                    'request_id': request_id
-                }, room=request.sid)
-                
-                # 更新会话历史列表
-                conversations = [
-                    {
-                        'id': cid,
-                        'title': conv['title'],
-                        'timestamp': conv['timestamp'],
-                        'status': conv.get('status', 'completed')
-                    } for cid, conv in session_manager.conversation_history.items()
-                ]
-                socketio.emit('update_history', {'conversations': conversations}, room=request.sid)
-                
-                logger.info(f'[ID:{request_id}] 消息处理完成')
-                
-            except (KeyError, IndexError) as e:
-                logger.error(f'[ID:{request_id}] 解析API响应时出错: {str(e)}')
-                logger.error(f'[ID:{request_id}] 响应数据结构: {response_data}')
-                socketio.emit('error', {
-                    'message': '解析API响应时出错，请稍后再试',
-                    'request_id': request_id
-                }, room=request.sid)
-        else:
-            logger.error(f'[ID:{request_id}] API响应格式异常: {response_data}')
+
+        if 'error' in response_data:
             socketio.emit('error', {
-                'message': 'API请求失败，请检查您的API密钥是否正确',
+                'message': response_data['error'],
                 'request_id': request_id
             }, room=request.sid)
+            return
+
+        # 处理API响应
+        if not (response_data and 'response' in response_data and 'choices' in response_data['response']):
+            socketio.emit('error', {
+                'message': 'API响应格式错误',
+                'request_id': request_id
+            }, room=request.sid)
+            return
+
+        try:
+            # 提取助手回复
+            assistant_message = response_data['response']['choices'][0]['message']['content']
             
+            # 构建助手消息对象
+            assistant_message_obj = {
+                'role': 'assistant',
+                'content': assistant_message,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+
+            # 添加助手消息到会话
+            session_manager.add_message_to_conversation(conversation_id, assistant_message_obj)
+
+            # 发送响应给客户端
+            socketio.emit('response', {
+                'message': assistant_message,
+                'conversation_id': conversation_id,
+                'response_time': round(response_data.get('response_time', 0), 2),
+                'token_count': response_data.get('token_count', 0),
+                'request_id': request_id
+            }, room=request.sid)
+
+            # 更新会话列表
+            conversations = [
+                {
+                    'id': cid,
+                    'title': conv['title'],
+                    'timestamp': conv['timestamp']
+                } for cid, conv in session_manager.conversation_history.items()
+            ]
+            socketio.emit('update_history', {'conversations': conversations}, room=request.sid)
+
+        except Exception as e:
+            logger.error(f'[ID:{request_id}] 处理API响应失败: {str(e)}')
+            socketio.emit('error', {
+                'message': '处理响应时发生错误，请重试',
+                'request_id': request_id
+            }, room=request.sid)
+            return
+
     except Exception as e:
         logger.error(f'[ID:{request_id}] 处理消息时发生错误: {str(e)}')
         import traceback
