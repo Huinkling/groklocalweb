@@ -750,18 +750,45 @@ def handle_message(data):
         system_message = 'You are a helpful assistant.'
         if search_results and 'answer' in search_results:
             logger.debug(f'[ID:{request_id}] 使用搜索结果构建系统消息')
-            system_message = f"""You are a helpful assistant. I will provide you with some search results as background information.
+            search_answer = search_results['answer']
+            
+            # 如果有搜索上下文，也包含进去
+            search_context = ""
+            if 'context' in search_results and search_results['context']:
+                # 检查context是否为列表
+                if isinstance(search_results['context'], list):
+                    # 合并前5个上下文项（如果有）
+                    context_items = search_results['context'][:5]
+                    for i, item in enumerate(context_items):
+                        if isinstance(item, dict) and 'content' in item:
+                            search_context += f"\n\n源 {i+1}:\n{item['content']}"
+            
+            # 构建增强的系统提示
+            system_message = f"""You are a helpful assistant with internet search capability. I will provide you with some search results as background information.
 
 Search Results:
-{search_results['answer']}
+{search_answer}
+{search_context}
 
-Please answer the user's question based on the search results above. If the search results are relevant, prioritize using information from them. If the search results are not relevant, you can ignore them and answer directly. Please ensure your response is accurate, relevant, and helpful."""
+Please answer the user's question based on the search results above. If the search results are relevant, prioritize using information from them. If the search results are not relevant, you can ignore them and answer directly based on your knowledge. Always ensure your response is accurate, relevant, and helpful. Be very brief, unless the user request is complex and substantive. Give preference to recent information from search results over your training data."""
 
-        # 构建API请求消息列表
+            logger.debug(f'[ID:{request_id}] 系统消息已包含搜索结果，长度: {len(system_message)}字符')
+        else:
+            logger.debug(f'[ID:{request_id}] 使用默认系统消息')
+
+        # 构建API请求消息列表 - 修正这里的逻辑，确保消息按正确顺序添加
         messages = [{'role': 'system', 'content': system_message}]
-        messages.extend(current_messages)
-        messages.append(user_message)
-        logger.debug(f'[ID:{request_id}] 准备发送API请求，总消息数: {len(messages)}')
+        
+        # 如果有现有会话消息，添加到系统消息之后
+        if current_messages:
+            messages.extend(current_messages)
+        
+        # 已经添加到会话历史中的用户消息不需要再添加
+        # 检查最后一个消息是否已经是当前用户消息
+        if not messages or messages[-1]['role'] != 'user' or messages[-1]['content'] != user_message['content']:
+            messages.append(user_message)
+            
+        logger.debug(f'[ID:{request_id}] 准备发送API请求，总消息数: {len(messages)}，包含系统消息: {system_message[:50]}...')
 
         # 调用API
         try:
