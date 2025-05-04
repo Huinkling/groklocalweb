@@ -32,7 +32,7 @@ socketio = SocketIO(
     cors_allowed_origins="*",  # 允许跨域请求
     ping_timeout=120,         # 进一步增加超时时间，避免长时间请求断开
     ping_interval=15,         # 减少ping间隔，提高连接稳定性
-    async_mode='gevent',      # 明确指定异步模式
+    async_mode='eventlet',    # 使用eventlet作为异步模式
     logger=True,              # 启用SocketIO日志
     engineio_logger=True      # 启用Engine.IO日志
 )
